@@ -55,9 +55,13 @@ export async function sendCollectorBridgeMessage(message: CollectorBridgeMessage
   const nativeBridge = window.flutter_inappwebview;
   if (nativeBridge == null) return debugBridgeEnabled();
   try {
-    await nativeBridge.callHandler(COLLECTOR_BRIDGE_HANDLER, message);
-    return true;
+    const result = await nativeBridge.callHandler(COLLECTOR_BRIDGE_HANDLER, message);
+    return bridgeDeliveryAccepted(result);
   } catch {
     return false;
   }
+}
+
+export function bridgeDeliveryAccepted(value: unknown): boolean {
+  return value === true;
 }
