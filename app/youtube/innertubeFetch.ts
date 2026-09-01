@@ -4,6 +4,9 @@ export interface ProviderFetchObserver {
   onRequestFailed?: (at: number) => void;
 }
 
+export const COLLECTOR_PROXY_HEADER = 'x-undercover-collector';
+export const COLLECTOR_PROXY_HEADER_VALUE = 'live-chat-v1';
+
 export class CollectorProxyConfigurationError extends Error {
   constructor() {
     super('NEXT_PUBLIC_COLLECTOR_PROXY_BASE_URL must be an allowed absolute URL');
@@ -25,7 +28,14 @@ export function resolveCollectorProxyBaseUrl(raw = process.env.NEXT_PUBLIC_COLLE
   if (parsed.protocol !== 'https:' && !(isLocalDevelopment && parsed.protocol === 'http:')) {
     throw new CollectorProxyConfigurationError();
   }
-  if (parsed.username !== '' || parsed.password !== '' || parsed.search !== '' || parsed.hash !== '') {
+  if (
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.pathname !== '/' ||
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    (!isLocalDevelopment && parsed.port !== '')
+  ) {
     throw new CollectorProxyConfigurationError();
   }
   return parsed;
@@ -52,7 +62,12 @@ export function createInnertubeFetch(
     try {
       const rewritten = rewriteInnertubeUrl(input as string | Request | URL, proxyBaseUrl);
       const request = new Request(rewritten, input instanceof Request ? input : undefined);
-      const response = await fetch(request, init);
+      const headers = new Headers(request.headers);
+      if (init?.headers != null) {
+        new Headers(init.headers).forEach((value, name) => headers.set(name, value));
+      }
+      headers.set(COLLECTOR_PROXY_HEADER, COLLECTOR_PROXY_HEADER_VALUE);
+      const response = await fetch(new Request(request, { headers }), init == null ? undefined : { ...init, headers });
       if (response.ok) observer.onRequestSucceeded?.(Date.now());
       else observer.onRequestFailed?.(Date.now());
       return response;

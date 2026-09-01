@@ -34,14 +34,21 @@ collector route는 YouTube `LiveChatTextMessage`에서 다음 값만 읽습니�
 `.env.example`을 기준으로 설정합니다.
 
 ```env
-NEXT_PUBLIC_COLLECTOR_PROXY_BASE_URL=https://your-managed-innertube-proxy.example
+NEXT_PUBLIC_COLLECTOR_PROXY_BASE_URL=https://collector.example.com
 NEXT_PUBLIC_COLLECTOR_BRIDGE_DEBUG=0
+NEXT_PUBLIC_SOURCE_CODE_URL=https://github.com/your-org/undercover-chazzy/tree/{full-sha}
+NEXT_PUBLIC_SOURCE_REVISION={full-sha}
 COLLECTOR_ONLY_MODE=1
+COLLECTOR_PROXY_ENABLED=1
+COLLECTOR_PUBLIC_ORIGIN=https://collector.example.com
 ```
 
-- `NEXT_PUBLIC_COLLECTOR_PROXY_BASE_URL`: 운영자가 관리하는 HTTPS InnerTube proxy. `http://`는 localhost 개발 환경에서만 허용합니다.
+- `NEXT_PUBLIC_COLLECTOR_PROXY_BASE_URL`: 운영 collector와 같은 HTTPS origin을 사용합니다. 내장 proxy는 허용된 YouTube session/player/next/live-chat 경로만 전달합니다.
 - `NEXT_PUBLIC_COLLECTOR_BRIDGE_DEBUG`: 로컬 진단 전용입니다. 운영에서는 반드시 `0`이어야 합니다. `1`이면 query bootstrap과 browser custom event mirror가 활성화됩니다.
+- `NEXT_PUBLIC_SOURCE_CODE_URL`·`NEXT_PUBLIC_SOURCE_REVISION`: 실제 실행 revision의 변경분과 build 자료가 공개된 불변 URL과 40자 SHA입니다. mutable branch나 upstream 원본 URL은 readiness를 통과하지 않습니다.
 - `COLLECTOR_ONLY_MODE`: 운영에서는 `1`로 설정해 원본 overlay route를 차단합니다.
+- `COLLECTOR_PROXY_ENABLED`: 내장 InnerTube proxy kill switch입니다. 정확히 `1`일 때만 route가 열립니다.
+- `COLLECTOR_PUBLIC_ORIGIN`: 배포된 collector의 정확한 HTTPS origin입니다. proxy build 값과 다르면 readiness가 실패합니다.
 
 ## 개발과 검증
 
@@ -69,9 +76,23 @@ http://localhost:3000/collector/youtube/{videoId}?bridgeToken={16자 이상}&col
 
 collector 응답은 요청별 nonce CSP, `Cache-Control: private, no-store`, `Referrer-Policy: no-referrer`, `X-Content-Type-Options: nosniff`, 권한 차단 정책을 포함합니다. CSP의 `connect-src`는 collector origin과 설정한 proxy origin만 허용합니다. Sentry와 Vercel Analytics를 제거해 채팅 또는 bridge payload가 제3자 telemetry로 전송되지 않게 했습니다.
 
+내장 proxy는 `/sw.js_data`, `/youtubei/v1/player`, `/youtubei/v1/next`, 두 live-chat continuation route만 허용합니다. 1MB request·8MB response·12초 timeout을 적용하고 cookie·authorization·응답 `set-cookie`를 전달하지 않습니다. `COLLECTOR_PROXY_ENABLED`가 꺼져 있거나 collector marker header가 없으면 404로 닫힙니다. 범용 URL proxy로 동작하지 않습니다.
+
+## 컨테이너 배포 준비
+
+`Dockerfile`은 Next standalone image를 만들고 `/collector/health`를 health check로 사용합니다. 아직 staging 앱 이름이 확정되지 않았으므로 실제 앱을 가리키는 설정은 만들지 않았고, `deploy/fly.collector.toml.example`만 제공합니다.
+
+배포 전 순서는 다음과 같습니다.
+
+1. 이 수정 fork를 공개 저장소에 push하고 배포할 40자 commit SHA를 고정합니다.
+2. example TOML을 복사해 staging 앱 이름, collector origin, 불변 source URL을 같은 값으로 바꿉니다.
+3. image를 빌드한 뒤 `/collector/health`가 `200 ready`인지 확인합니다. 하나라도 빠지면 `503 not_ready`입니다.
+4. Flutter에는 같은 origin을 `LIVE_CHAT_COLLECTOR_BASE_URL`과 `LIVE_CHAT_COLLECTOR_PROXY_ORIGIN` 두 값으로 넣습니다.
+5. 종료된 replay가 아니라 진행 중인 공개 live로 iOS·Android 전경 수집을 검증합니다.
+
 ## 배포 전 필수 확인
 
-- 자체 관리 proxy의 소유자, SLO, kill switch를 확정합니다. `.env.example`의 upstream 주소는 개발 검증용 기본값일 뿐 운영 승인값이 아닙니다.
+- 내장 proxy의 운영 owner, SLO, rate alert를 확정합니다. kill switch는 `COLLECTOR_PROXY_ENABLED=0`입니다.
 - Next.js는 2026-08 공식 보안 패치가 포함된 Maintenance LTS `15.5.24`에 고정합니다. 정기 보안 릴리스마다 지원 patch를 다시 검토합니다.
 - Next.js 15.5.24의 고정 transitive dependency에는 `postcss`, `nanoid`, `@babel/core` 보안 패치 override를 적용합니다. Next.js patch 변경 시 override 필요성을 다시 검토합니다.
 - `youtubei.js 17.2.0`을 정확 버전으로 고정합니다. 기준 Chazzy의 16.0.1은 2026-09 실제 fixture에서 최신 YouTube renderer 파싱 경고가 재현되어 올렸습니다.

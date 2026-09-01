@@ -15,7 +15,10 @@ function collectorProxyOrigin(): string {
 
 export function middleware(request: NextRequest) {
   const isCollectorPath = request.nextUrl.pathname.startsWith('/collector/');
-  if (process.env.COLLECTOR_ONLY_MODE === '1' && !isCollectorPath) {
+  const isEnabledProxyPath =
+    process.env.COLLECTOR_PROXY_ENABLED === '1' &&
+    (request.nextUrl.pathname === '/sw.js_data' || request.nextUrl.pathname.startsWith('/youtubei/'));
+  if (process.env.COLLECTOR_ONLY_MODE === '1' && !isCollectorPath && !isEnabledProxyPath) {
     const notFound = new NextResponse('Not Found', { status: 404 });
     notFound.headers.set('Cache-Control', 'private, no-store, max-age=0');
     notFound.headers.set('X-Content-Type-Options', 'nosniff');

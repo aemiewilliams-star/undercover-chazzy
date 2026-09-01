@@ -39,3 +39,15 @@ body {
   margin: 0;
   word-break: break-all;
 }
+
+.collector-source-notice {
+  margin-top: 20px;
+  padding-top: 12px;
+  border-top: 1px solid #34363a;
+  color: #aeb4bc;
+  font-size: 12px;
+}
+
+.collector-source-notice a {
+  color: #8ab4f8;
+}

@@ -1,0 +1,31 @@
+app = 'replace-with-undercover-collector-staging'
+primary_region = 'nrt'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[build.args]
+  NEXT_PUBLIC_COLLECTOR_PROXY_BASE_URL = 'https://replace-with-undercover-collector-staging.fly.dev'
+  NEXT_PUBLIC_COLLECTOR_BRIDGE_DEBUG = '0'
+  NEXT_PUBLIC_SOURCE_CODE_URL = 'https://github.com/your-org/undercover-chazzy/tree/REPLACE_WITH_FULL_SHA'
+  NEXT_PUBLIC_SOURCE_REVISION = 'REPLACE_WITH_FULL_SHA'
+
+[env]
+  COLLECTOR_ONLY_MODE = '1'
+  COLLECTOR_PROXY_ENABLED = '1'
+  COLLECTOR_PUBLIC_ORIGIN = 'https://replace-with-undercover-collector-staging.fly.dev'
+  NODE_ENV = 'production'
+
+[http_service]
+  internal_port = 3000
+  force_https = true
+  auto_stop_machines = 'off'
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[http_service.checks]]
+  grace_period = '15s'
+  interval = '30s'
+  method = 'GET'
+  path = '/collector/health'
+  timeout = '5s'

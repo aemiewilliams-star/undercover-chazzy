@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  COLLECTOR_PROXY_HEADER,
+  COLLECTOR_PROXY_HEADER_VALUE,
   CollectorProxyConfigurationError,
   createInnertubeFetch,
   resolveCollectorProxyBaseUrl,
@@ -23,12 +25,19 @@ void test('proxy configuration allows HTTPS and local HTTP only', () => {
     () => resolveCollectorProxyBaseUrl('https://user:pass@proxy.example'),
     CollectorProxyConfigurationError,
   );
+  assert.throws(() => resolveCollectorProxyBaseUrl('https://proxy.example/base'), CollectorProxyConfigurationError);
+  assert.throws(() => resolveCollectorProxyBaseUrl('https://proxy.example:8443'), CollectorProxyConfigurationError);
 });
 
 void test('HTTP 503 is reported as a provider failure', async () => {
   const originalFetch = globalThis.fetch;
   const observed = { started: 0, succeeded: 0, failed: 0 };
-  globalThis.fetch = () => Promise.resolve(new Response('unavailable', { status: 503 }));
+  let forwardedHeader: string | null = null;
+  globalThis.fetch = (input) => {
+    assert.ok(input instanceof Request);
+    forwardedHeader = input.headers.get(COLLECTOR_PROXY_HEADER);
+    return Promise.resolve(new Response('unavailable', { status: 503 }));
+  };
 
   try {
     const collectorFetch = createInnertubeFetch(
@@ -42,6 +51,7 @@ void test('HTTP 503 is reported as a provider failure', async () => {
     const response = await collectorFetch('https://www.youtube.com/youtubei/v1/live_chat/get_live_chat?key=abc');
 
     assert.equal(response.status, 503);
+    assert.equal(forwardedHeader, COLLECTOR_PROXY_HEADER_VALUE);
     assert.deepEqual(observed, { started: 1, succeeded: 0, failed: 1 });
   } finally {
     globalThis.fetch = originalFetch;

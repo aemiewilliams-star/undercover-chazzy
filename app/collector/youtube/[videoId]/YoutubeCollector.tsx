@@ -7,6 +7,7 @@ import useCollectorBootstrap from '../../useCollectorBootstrap';
 import useCollectorBridge from '../../useCollectorBridge';
 import useLiveChat, { YoutubeLiveChatHealth } from '../../../youtube/useLiveChat';
 import { LiveChatTextMessage } from '../../../youtube/types';
+import { immutableCollectorSourceUrl } from '../../sourceNotice';
 
 const INITIAL_HEALTH: YoutubeLiveChatHealth = {
   liveness: 'connecting',
@@ -15,6 +16,15 @@ const INITIAL_HEALTH: YoutubeLiveChatHealth = {
   lastMessageAt: null,
   reconnectAttempt: 0,
 };
+
+function sourceCodeUrl(): string | null {
+  return (
+    immutableCollectorSourceUrl(
+      process.env.NEXT_PUBLIC_SOURCE_CODE_URL,
+      process.env.NEXT_PUBLIC_SOURCE_REVISION,
+    )?.toString() ?? null
+  );
+}
 
 function formatTimestamp(value: number | null): string {
   return value == null ? '없음' : new Date(value).toISOString();
@@ -25,6 +35,7 @@ export default function YoutubeCollector({ videoId }: { videoId: string }) {
   const [health, setHealth] = useState<YoutubeLiveChatHealth>(INITIAL_HEALTH);
   const runtimeConfig = bootstrap.status === 'ready' ? bootstrap.config : null;
   const { enqueue, recordNormalizationDrop, emitPlatformStatus, stats } = useCollectorBridge(runtimeConfig, health);
+  const publishedSourceUrl = sourceCodeUrl();
 
   const handleChatUpdate = useCallback(
     (action: YTNodes.AddChatItemAction) => {
@@ -84,6 +95,15 @@ export default function YoutubeCollector({ videoId }: { videoId: string }) {
           <dt>정규화 제외</dt>
           <dd>{stats.droppedByNormalizer}</dd>
         </dl>
+        <footer className="collector-source-notice">
+          {publishedSourceUrl == null ? (
+            <span>실행 중인 Collector 소스 링크 미설정</span>
+          ) : (
+            <a href={publishedSourceUrl} target="_blank" rel="noreferrer">
+              실행 중인 Collector 소스 보기
+            </a>
+          )}
+        </footer>
       </section>
     </main>
   );
