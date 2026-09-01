@@ -157,7 +157,15 @@ export default function useLiveChat(
       };
 
       try {
-        const innertube = await Innertube.create({ fetch: createInnertubeFetch(observer) });
+        // Live chat only needs the Innertube session and API actions. Player
+        // signature extraction and cold config retrieval add /iframe_api,
+        // player-JS and /youtubei/v1/config requests that are unrelated to
+        // chat collection and intentionally outside our narrow proxy allowlist.
+        const innertube = await Innertube.create({
+          fetch: createInnertubeFetch(observer),
+          retrieve_player: false,
+          retrieve_innertube_config: false,
+        });
         if (disposed || generation !== currentGeneration) return;
         phase = 'get_info';
         const info = await innertube.getInfo(videoId);
