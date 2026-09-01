@@ -3,7 +3,12 @@ import Chazzy from './Chazzy';
 
 export const dynamic = 'force-dynamic';
 
-export default function ChazzyPage({ params: { channelId } }: { params: { channelId: string } }): ReactElement {
+export default async function ChazzyPage({
+  params,
+}: {
+  params: Promise<{ channelId: string }>;
+}): Promise<ReactElement> {
+  const { channelId } = await params;
   const [chzzkChannelId, twitchChannelId, afreecatvChannelId, ...youtubeVideoIdPieces] = channelId.split('-');
   const youtubeVideoId = youtubeVideoIdPieces.join('-');
 

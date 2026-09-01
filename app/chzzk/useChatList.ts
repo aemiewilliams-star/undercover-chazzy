@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { captureException, setContext } from '@sentry/nextjs';
 import { Chat, CheeseChat, ClearMessage, MessagePart, TextMessagePart } from '../chat/types';
 import { nicknameColors } from './constants';
 import { Chat as ChzzkChat, ChatCmd, Extras, Message, MessageTypeCode, Profile } from './types';
@@ -183,9 +182,8 @@ export default function useChatList(
                 } | null = null;
                 try {
                   chat = convertChat(chzzkChat);
-                } catch (e: unknown) {
-                  setContext('WebSocket Message', json);
-                  captureException(e);
+                } catch {
+                  // Do not send chat payloads or parser exceptions to third-party telemetry.
                 }
                 return chat;
               })
@@ -233,7 +231,7 @@ export default function useChatList(
       worker.terminate();
       ws.close();
     };
-  }, [accessToken, chatChannelId, convertChat]);
+  }, [accessToken, chatChannelId, convertChat, onClearMessage]);
 
   useEffect(() => {
     isRefreshingRef.current = true;
