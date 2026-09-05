@@ -8,6 +8,8 @@ import { ReplayScheduler, replayItemsFromPage, replayPage } from './replaySchedu
 const WATCHDOG_INTERVAL_MS = 2000;
 const REPLAY_TICK_MS = 250;
 const REPLAY_SEEN_LIMIT = 5000;
+/** Never fetch replay pages faster than this; a page covers ~15 s of a busy chat. */
+const REPLAY_FETCH_MIN_GAP_MS = 1000;
 
 export interface YoutubeLiveChatHealth {
   liveness: CollectorLiveness;
@@ -167,15 +169,24 @@ export default function useLiveChat(
       const scheduler = new ReplayScheduler<YTNodes.AddChatItemAction>(replayResumeOffsetMs ?? playback.startOffsetMs);
       replayScheduler = scheduler;
       let nextContinuation: string | null = initialContinuation;
+      let lastFetchAt = 0;
 
       const fetchMore = async () => {
         if (disposed || generation !== currentGeneration || replayFetchInFlight || nextContinuation == null) return;
+        if (Date.now() - lastFetchAt < REPLAY_FETCH_MIN_GAP_MS) return;
         replayFetchInFlight = true;
+        lastFetchAt = Date.now();
         try {
+          // currentPlayerState seeks: with the initial continuation YouTube
+          // answers from the requested offset instead of the start of the
+          // video (walking from zero to a one-hour mark took hundreds of
+          // requests and got the session throttled on 2026-09-05). Later
+          // pages follow the continuation; the offset keeps them in step.
           const response = await innertube.actions.execute('live_chat/get_live_chat_replay', {
             continuation: nextContinuation,
+            currentPlayerState: { playerOffsetMs: String(scheduler.positionMs(Date.now())) },
             parse: true,
-          });
+          } as never);
           if (disposed || generation !== currentGeneration || replayScheduler !== scheduler) return;
           const page = replayPage(response);
           if (page == null) {
