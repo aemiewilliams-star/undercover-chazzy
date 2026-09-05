@@ -158,6 +158,10 @@ export default function useLiveChat(
     const scheduleReconnect = (code: CollectorStatusCode) => {
       if (disposed || reconnectScheduled) return;
       diag({ at: 'schedule_reconnect', code, attempt: reconnectAttempt });
+      // Every reconnect path (fetch failure, stall watchdog, stream end) resumes
+      // a recorded playback from the drained position; before W6 the stall path
+      // restarted from the URL's start offset.
+      if (replayScheduler != null) replayResumeOffsetMs = replayScheduler.resumePositionMs();
       stopActiveLiveChat();
 
       const delay = reconnectDelayMs(reconnectAttempt);
@@ -230,7 +234,8 @@ export default function useLiveChat(
           }
         } catch {
           if (disposed || generation !== currentGeneration || replayScheduler !== scheduler) return;
-          replayResumeOffsetMs = scheduler.positionMs(Date.now());
+          // Resume from what was actually drained, never past an unreceived page (W6).
+          replayResumeOffsetMs = scheduler.resumePositionMs();
           scheduleReconnect('provider_poll_failed');
         } finally {
           replayFetchInFlight = false;

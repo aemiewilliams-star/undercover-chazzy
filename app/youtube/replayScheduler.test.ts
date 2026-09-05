@@ -87,3 +87,37 @@ void test('a negative or fractional start offset is refused', () => {
   assert.throws(() => new ReplayScheduler(-1), RangeError);
   assert.throws(() => new ReplayScheduler(1.5), RangeError);
 });
+
+void test('resumePositionMs never skips undelivered or unreceived chat (W6 invariant)', () => {
+  const scheduler = new ReplayScheduler<string>(60_000, 10_000);
+  // Before the first page: resume at the start offset.
+  assert.equal(scheduler.resumePositionMs(), 60_000);
+  scheduler.push([
+    { offsetMs: 60_100, action: 'a' },
+    { offsetMs: 61_000, action: 'b' },
+    { offsetMs: 62_000, action: 'c' },
+  ]);
+  assert.equal(scheduler.fetchedHorizonMs, 62_000);
+  scheduler.start(1_000_000);
+  // Started but nothing drained yet: still the start offset, not the clock.
+  assert.equal(scheduler.resumePositionMs(), 60_000);
+  // Clock at 60_500 → 'a' released; resume from the drained position (60_500),
+  // not from the clock a moment later.
+  assert.deepEqual(
+    scheduler.due(1_000_500).map((item) => item.action),
+    ['a'],
+  );
+  assert.equal(scheduler.resumePositionMs(), 60_500);
+  // Clock runs past the fetched horizon with the next page not received:
+  // resume clamps to the horizon (62_000), so 62_000+ is never skipped.
+  assert.deepEqual(
+    scheduler.due(1_005_000).map((item) => item.action),
+    ['b', 'c'],
+  );
+  assert.equal(scheduler.positionMs(1_005_000), 65_000);
+  assert.equal(scheduler.resumePositionMs(), 62_000);
+  // A later page raises the horizon; resume follows the drained position again.
+  scheduler.push([{ offsetMs: 70_000, action: 'd' }]);
+  assert.deepEqual(scheduler.due(1_006_000), []);
+  assert.equal(scheduler.resumePositionMs(), 66_000);
+});

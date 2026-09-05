@@ -87,6 +87,8 @@ export class ReplayScheduler<T = unknown> {
   private buffer: ReplayScheduledItem<T>[] = [];
   private horizonMs: number;
   private exhaustedPages = false;
+  /** Playback position at the last `due()` call — everything at or before it has been released. */
+  private lastDuePositionMs: number | null = null;
 
   constructor(startOffsetMs: number, aheadMs = REPLAY_BUFFER_AHEAD_MS) {
     if (!Number.isInteger(startOffsetMs) || startOffsetMs < 0) throw new RangeError('start_offset_invalid');
@@ -143,10 +145,29 @@ export class ReplayScheduler<T = unknown> {
     return this.horizonMs < this.positionMs(nowMs) + this.aheadMs;
   }
 
+  /** Highest video offset any fetched page has covered so far. */
+  get fetchedHorizonMs(): number {
+    return this.horizonMs;
+  }
+
+  /**
+   * Where a reconnect must resume so that nothing is lost (work list W6, same
+   * invariant as the CHZZK replay fix): not the clock position — the tick
+   * releases up to 250 ms behind it and the last page may not have arrived —
+   * but the position the last `due()` actually drained, clamped to the
+   * fetched horizon so an unreceived page is never skipped. Items released
+   * again after the seek are deduplicated by the caller (message ids).
+   */
+  resumePositionMs(): number {
+    if (this.clockStartMs == null || this.lastDuePositionMs == null) return this.startOffset;
+    return Math.min(this.lastDuePositionMs, this.horizonMs);
+  }
+
   /** Releases, in order, every item whose offset the clock has reached. */
   due(nowMs: number): ReplayScheduledItem<T>[] {
     if (this.clockStartMs == null) return [];
     const position = this.positionMs(nowMs);
+    this.lastDuePositionMs = position;
     let count = 0;
     while (count < this.buffer.length && this.buffer[count].offsetMs <= position) count += 1;
     return this.buffer.splice(0, count);
