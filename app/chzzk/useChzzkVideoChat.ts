@@ -28,6 +28,15 @@ import { CHZZK_VIDEO_NO, chzzkVideoChatNextOffset, chzzkVideoChatPage } from './
 const REPLAY_TICK_MS = 250;
 const REPLAY_FETCH_MIN_GAP_MS = 1000;
 const REQUEST_TIMEOUT_MS = 8_000;
+/**
+ * Heartbeats read the last published health snapshot, so buffered playback
+ * must be republished on a clock: with pages fetched minutes ahead the last
+ * real fetch can be old while chat is still flowing, and a stale
+ * lastProviderSuccessAt would trip the app's stall watchdog (60 s) and
+ * rotate the collector mid-replay (headless probe 2026-09-05: success age
+ * climbed to 57 s on a healthy replay).
+ */
+const HEALTH_PUBLISH_MS = 2000;
 
 export type ChzzkVideoChatHealth = YoutubeLiveChatHealth;
 
@@ -90,6 +99,7 @@ export default function useChzzkVideoChat(
     let reconnectAttempt = 0;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let replayTimer: ReturnType<typeof setTimeout> | undefined;
+    let healthTimer: ReturnType<typeof setInterval> | undefined;
     let controller: AbortController | undefined;
     let lastProviderPollStartedAt: number | null = null;
     let lastProviderSuccessAt: number | null = null;
@@ -117,6 +127,8 @@ export default function useChzzkVideoChat(
       controller = undefined;
       if (replayTimer != null) clearTimeout(replayTimer);
       replayTimer = undefined;
+      if (healthTimer != null) clearInterval(healthTimer);
+      healthTimer = undefined;
     };
 
     const fail = (code: CollectorStatusCode, status: 'ended' | 'unavailable') => {
@@ -228,6 +240,11 @@ export default function useChzzkVideoChat(
       };
 
       emitHealth(reconnectAttempt === 0 ? 'connecting' : 'degraded');
+      healthTimer = setInterval(() => {
+        if (disposed || generation !== currentGeneration) return;
+        // Republish the same liveness with fresh timestamps (no transition).
+        emitHealth(liveness);
+      }, HEALTH_PUBLISH_MS);
       tick();
     };
 
