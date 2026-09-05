@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import Innertube, { YT, YTNodes } from 'youtubei.js';
-import { CollectorLiveness, CollectorStatusCode } from '../collector/contracts';
+import { CollectorLiveness, CollectorPlayback, CollectorStatusCode } from '../collector/contracts';
 import { CollectorProxyConfigurationError, createInnertubeFetch, ProviderFetchObserver } from './innertubeFetch';
 import { providerHasStalled, reconnectDelayMs } from './liveChatPolicy';
+import { ReplayScheduler, replayItemsFromPage, replayPage } from './replayScheduler';
 
 const WATCHDOG_INTERVAL_MS = 2000;
+const REPLAY_TICK_MS = 250;
+const REPLAY_SEEN_LIMIT = 5000;
 
 export interface YoutubeLiveChatHealth {
   liveness: CollectorLiveness;
@@ -18,6 +21,8 @@ export interface YoutubeLiveChatHealth {
 export interface YoutubeLiveChatOptions {
   onHealthUpdate?: (health: YoutubeLiveChatHealth) => void;
   onPlatformStatus?: (status: 'live' | 'ended' | 'unavailable', code?: CollectorStatusCode) => void;
+  /** Recorded playback of an ended broadcast; absent means live collection. */
+  playback?: CollectorPlayback;
 }
 
 const INITIAL_HEALTH: YoutubeLiveChatHealth = {
@@ -58,6 +63,14 @@ export default function useLiveChat(
     let lastMessageAt: number | null = null;
     let currentLiveness: CollectorLiveness = 'connecting';
     let currentCode: CollectorStatusCode | undefined;
+    // Recorded playback state. The scheduler paces replay pages on the session
+    // clock; a reconnect resumes from the position the clock had reached.
+    let replayScheduler: ReplayScheduler<YTNodes.AddChatItemAction> | undefined;
+    let replayTimer: ReturnType<typeof setTimeout> | undefined;
+    let replayFetchInFlight = false;
+    let replayResumeOffsetMs: number | null = null;
+    const replaySeen = new Set<string>();
+    const collecting = () => activeLiveChat != null || (replayScheduler?.started ?? false);
 
     const emitHealth = (liveness: CollectorLiveness, code?: CollectorStatusCode) => {
       if (disposed) return;
@@ -93,7 +106,15 @@ export default function useLiveChat(
       scheduleReconnect('provider_stream_ended');
     };
 
+    const stopReplay = () => {
+      if (replayTimer != null) clearTimeout(replayTimer);
+      replayTimer = undefined;
+      replayScheduler = undefined;
+      replayFetchInFlight = false;
+    };
+
     const stopActiveLiveChat = () => {
+      stopReplay();
       const current = activeLiveChat;
       activeLiveChat = undefined;
       if (current == null) return;
@@ -131,6 +152,90 @@ export default function useLiveChat(
       }, delay);
     };
 
+    /**
+     * Recorded playback (owner decision 2026-09-05): walk the chat replay pages
+     * a couple of minutes ahead of the session clock and release each chat
+     * action when the clock reaches its video offset. youtubei.js' LiveChat
+     * would drain the replay at its smoothing rate instead of the real pace.
+     */
+    const startRecordedPlayback = (
+      innertube: Innertube,
+      initialContinuation: string,
+      playback: CollectorPlayback,
+      currentGeneration: number,
+    ) => {
+      const scheduler = new ReplayScheduler<YTNodes.AddChatItemAction>(replayResumeOffsetMs ?? playback.startOffsetMs);
+      replayScheduler = scheduler;
+      let nextContinuation: string | null = initialContinuation;
+
+      const fetchMore = async () => {
+        if (disposed || generation !== currentGeneration || replayFetchInFlight || nextContinuation == null) return;
+        replayFetchInFlight = true;
+        try {
+          const response = await innertube.actions.execute('live_chat/get_live_chat_replay', {
+            continuation: nextContinuation,
+            parse: true,
+          });
+          if (disposed || generation !== currentGeneration || replayScheduler !== scheduler) return;
+          const page = replayPage(response);
+          if (page == null) {
+            nextContinuation = null;
+            scheduler.markExhausted();
+          } else {
+            scheduler.push(replayItemsFromPage<YTNodes.AddChatItemAction>(page.actions));
+            if (!page.continuation || page.continuation === nextContinuation) {
+              nextContinuation = null;
+              scheduler.markExhausted();
+            } else {
+              nextContinuation = page.continuation;
+            }
+          }
+          if (!scheduler.started) {
+            scheduler.start(Date.now());
+            emitHealth('healthy');
+            optionsRef.current.onPlatformStatus?.('live');
+          }
+        } catch {
+          if (disposed || generation !== currentGeneration || replayScheduler !== scheduler) return;
+          replayResumeOffsetMs = scheduler.positionMs(Date.now());
+          scheduleReconnect('provider_poll_failed');
+        } finally {
+          replayFetchInFlight = false;
+        }
+      };
+
+      const tick = () => {
+        if (disposed || generation !== currentGeneration || replayScheduler !== scheduler) return;
+        const now = Date.now();
+        if (scheduler.needsMore(now)) void fetchMore();
+        if (scheduler.started) {
+          for (const item of scheduler.due(now)) {
+            const messageId = (item.action as { item?: { id?: unknown } }).item?.id;
+            if (typeof messageId === 'string') {
+              if (replaySeen.has(messageId)) continue;
+              if (replaySeen.size >= REPLAY_SEEN_LIMIT) replaySeen.clear();
+              replaySeen.add(messageId);
+            }
+            onChatUpdate(item.action);
+          }
+          // Pages are fetched minutes ahead, so the last real poll can be old
+          // while chat is still flowing: buffered playback counts as the
+          // provider being alive. An empty buffer with pages still pending
+          // is left to the stall watchdog.
+          if (scheduler.bufferedCount > 0) lastProviderSuccessAt = now;
+          if (scheduler.finished()) {
+            stopReplay();
+            emitHealth('failed', 'provider_stream_ended');
+            optionsRef.current.onPlatformStatus?.('ended', 'provider_stream_ended');
+            return;
+          }
+        }
+        replayTimer = setTimeout(tick, REPLAY_TICK_MS);
+      };
+
+      tick();
+    };
+
     const connect = async () => {
       const currentGeneration = ++generation;
       lastProviderPollStartedAt = null;
@@ -142,13 +247,13 @@ export default function useLiveChat(
         onRequestStarted: (at) => {
           if (disposed || generation !== currentGeneration) return;
           lastProviderPollStartedAt = at;
-          emitHealth(activeLiveChat == null ? 'connecting' : currentLiveness, currentCode);
+          emitHealth(collecting() ? currentLiveness : 'connecting', currentCode);
         },
         onRequestSucceeded: (at) => {
           if (disposed || generation !== currentGeneration) return;
           lastProviderSuccessAt = at;
-          if (activeLiveChat != null) reconnectAttempt = 0;
-          emitHealth(activeLiveChat == null ? 'connecting' : 'healthy');
+          if (collecting()) reconnectAttempt = 0;
+          emitHealth(collecting() ? 'healthy' : 'connecting');
         },
         onRequestFailed: () => {
           if (disposed || generation !== currentGeneration) return;
@@ -170,6 +275,19 @@ export default function useLiveChat(
         phase = 'get_info';
         const info = await innertube.getInfo(videoId);
         if (disposed || generation !== currentGeneration) return;
+
+        const playback = optionsRef.current.playback;
+        if (playback?.kind === 'recorded') {
+          phase = 'start';
+          const continuation = info.livechat?.continuation;
+          if (typeof continuation !== 'string' || continuation === '') {
+            // The channel did not keep this broadcast's chat replay.
+            failPermanently('live_chat_start_failed');
+            return;
+          }
+          startRecordedPlayback(innertube, continuation, playback, currentGeneration);
+          return;
+        }
 
         if (!info.basic_info.is_live) {
           stopActiveLiveChat();
@@ -206,7 +324,7 @@ export default function useLiveChat(
     };
 
     const watchdogTimer = setInterval(() => {
-      if (disposed || activeLiveChat == null || reconnectScheduled) return;
+      if (disposed || !collecting() || reconnectScheduled) return;
       if (providerHasStalled(lastProviderSuccessAt, lastProviderPollStartedAt, Date.now())) {
         scheduleReconnect('provider_stalled');
       }

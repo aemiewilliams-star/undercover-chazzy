@@ -68,9 +68,35 @@ export type CollectorBridgeMessage =
   | CollectorHeartbeatMessage
   | CollectorPlatformStatusMessage;
 
+/**
+ * Recorded playback: the broadcast has ended and the channel kept its chat
+ * replay. The collector re-emits that chat at the original pace on the
+ * session clock, starting `startOffsetMs` into the video (owner decision
+ * 2026-09-05). Absent → live collection, unchanged.
+ */
+export interface CollectorPlayback {
+  kind: 'recorded';
+  startOffsetMs: number;
+}
+
+export const COLLECTOR_PLAYBACK_MAX_START_OFFSET_MS = 24 * 60 * 60 * 1000;
+
 export interface CollectorRuntimeConfig {
   bridgeToken: string;
   collectorRunId: string;
+  playback?: CollectorPlayback;
+}
+
+export function isCollectorPlayback(value: unknown): value is CollectorPlayback {
+  if (typeof value !== 'object' || value == null) return false;
+  const candidate = value as Partial<CollectorPlayback>;
+  return (
+    candidate.kind === 'recorded' &&
+    typeof candidate.startOffsetMs === 'number' &&
+    Number.isInteger(candidate.startOffsetMs) &&
+    candidate.startOffsetMs >= 0 &&
+    candidate.startOffsetMs <= COLLECTOR_PLAYBACK_MAX_START_OFFSET_MS
+  );
 }
 
 export function isCollectorRuntimeConfig(value: unknown): value is CollectorRuntimeConfig {
@@ -85,6 +111,7 @@ export function isCollectorRuntimeConfig(value: unknown): value is CollectorRunt
     candidate.collectorRunId.length >= 8 &&
     candidate.collectorRunId.length <= 128 &&
     safeId.test(candidate.bridgeToken) &&
-    safeId.test(candidate.collectorRunId)
+    safeId.test(candidate.collectorRunId) &&
+    (candidate.playback === undefined || isCollectorPlayback(candidate.playback))
   );
 }

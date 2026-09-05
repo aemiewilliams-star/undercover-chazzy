@@ -37,13 +37,19 @@ export default function YoutubeCollector({ videoId }: { videoId: string }) {
   const { enqueue, recordNormalizationDrop, emitPlatformStatus, stats } = useCollectorBridge(runtimeConfig, health);
   const publishedSourceUrl = sourceCodeUrl();
 
+  const playback = runtimeConfig?.playback;
   const handleChatUpdate = useCallback(
     (action: YTNodes.AddChatItemAction) => {
       if (!(action instanceof YTNodes.AddChatItemAction) || action.item.type !== 'LiveChatTextMessage') return;
       const message = action.item as unknown as LiveChatTextMessage;
       const normalized = normalizeYoutubeTextMessage({
         authorOpaqueKey: message.author?.id,
-        timestamp: message.timestamp,
+        // Recorded playback re-emits the chat on the session clock: the
+        // message's own timestamp is when it was said during the original
+        // broadcast, which would land it in minute buckets long past. Leaving
+        // the provider timestamp out makes the normalizer stamp the moment
+        // of emission instead (timingSource collector_received).
+        timestamp: playback?.kind === 'recorded' ? undefined : message.timestamp,
         runs: message.message?.runs,
         collectorReceivedAt: Date.now(),
       });
@@ -53,7 +59,7 @@ export default function YoutubeCollector({ videoId }: { videoId: string }) {
       }
       enqueue(normalized.event);
     },
-    [enqueue, recordNormalizationDrop],
+    [enqueue, playback, recordNormalizationDrop],
   );
 
   const handleMetadataUpdate = useCallback(() => {}, []);
@@ -67,6 +73,7 @@ export default function YoutubeCollector({ videoId }: { videoId: string }) {
   useLiveChat(runtimeConfig == null ? undefined : videoId, handleChatUpdate, handleMetadataUpdate, {
     onHealthUpdate: setHealth,
     onPlatformStatus: handlePlatformStatus,
+    playback,
   });
 
   return (
@@ -78,6 +85,8 @@ export default function YoutubeCollector({ videoId }: { videoId: string }) {
           <dd>{bootstrap.status}</dd>
           <dt>Provider</dt>
           <dd>{health.liveness}</dd>
+          <dt>Playback</dt>
+          <dd>{playback == null ? 'live' : `recorded from ${Math.floor(playback.startOffsetMs / 1000)}s`}</dd>
           <dt>마지막 poll 시작</dt>
           <dd>{formatTimestamp(health.lastProviderPollStartedAt)}</dd>
           <dt>마지막 poll 성공</dt>
