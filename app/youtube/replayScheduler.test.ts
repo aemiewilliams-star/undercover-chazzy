@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ReplayScheduler, replayItemsFromPage, replayPage } from './replayScheduler';
+import { ReplayScheduler, ReplaySeenIds, replayItemsFromPage, replayPage } from './replayScheduler';
 
 const chat = (id: string) => ({ type: 'AddChatItemAction', item: { type: 'LiveChatTextMessage', id } });
 const replay = (offsetMs: unknown, ...actions: unknown[]) => ({
@@ -120,4 +120,31 @@ void test('resumePositionMs never skips undelivered or unreceived chat (W6 invar
   scheduler.push([{ offsetMs: 70_000, action: 'd' }]);
   assert.deepEqual(scheduler.due(1_006_000), []);
   assert.equal(scheduler.resumePositionMs(), 66_000);
+});
+
+void test('ReplaySeenIds evicts only ids before the resume boundary, never the boundary itself (W6 F1)', () => {
+  const seen = new ReplaySeenIds(5);
+  for (let i = 0; i < 5; i += 1) seen.add(`m${i}`, i * 1_000, 0);
+  assert.equal(seen.size, 5);
+  // Boundary at 3_000: m0..m2 are evictable, m3/m4 are not.
+  seen.add('m5', 5_000, 3_000);
+  assert.equal(seen.size, 5);
+  assert.equal(seen.has('m0'), false);
+  assert.equal(seen.has('m3'), true);
+  assert.equal(seen.has('m4'), true);
+  assert.equal(seen.has('m5'), true);
+  // Everything at or after the boundary: nothing evictable, the set grows past the target.
+  seen.add('m6', 6_000, 1_000);
+  seen.add('m7', 7_000, 1_000);
+  assert.equal(seen.size, 7);
+  for (const id of ['m1', 'm2', 'm3', 'm4', 'm5', 'm6', 'm7']) assert.equal(seen.has(id), true, id);
+  // Boundary moves on: older ids drain first, in insertion order.
+  seen.add('m8', 8_000, 8_000);
+  assert.equal(seen.size, 5);
+  assert.deepEqual(
+    ['m4', 'm5', 'm6', 'm7', 'm8'].map((id) => seen.has(id)),
+    [true, true, true, true, true],
+  );
+  assert.equal(seen.has('m3'), false);
+  assert.throws(() => new ReplaySeenIds(0), RangeError);
 });

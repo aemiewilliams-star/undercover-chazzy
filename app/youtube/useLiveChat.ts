@@ -3,7 +3,7 @@ import Innertube, { YT, YTNodes } from 'youtubei.js';
 import { CollectorLiveness, CollectorPlayback, CollectorStatusCode } from '../collector/contracts';
 import { CollectorProxyConfigurationError, createInnertubeFetch, ProviderFetchObserver } from './innertubeFetch';
 import { providerHasStalled, reconnectDelayMs } from './liveChatPolicy';
-import { ReplayScheduler, replayItemsFromPage, replayPage } from './replayScheduler';
+import { ReplayScheduler, ReplaySeenIds, replayItemsFromPage, replayPage } from './replayScheduler';
 
 const WATCHDOG_INTERVAL_MS = 2000;
 const REPLAY_TICK_MS = 250;
@@ -90,7 +90,8 @@ export default function useLiveChat(
     let replayTimer: ReturnType<typeof setTimeout> | undefined;
     let replayFetchInFlight = false;
     let replayResumeOffsetMs: number | null = null;
-    const replaySeen = new Set<string>();
+    // Survives reconnects; evicts only ids before the resume boundary (W6 F1).
+    const replaySeen = new ReplaySeenIds(REPLAY_SEEN_LIMIT);
     const collecting = () => activeLiveChat != null || (replayScheduler?.started ?? false);
 
     const emitHealth = (liveness: CollectorLiveness, code?: CollectorStatusCode) => {
@@ -251,8 +252,7 @@ export default function useLiveChat(
             const messageId = (item.action as { item?: { id?: unknown } }).item?.id;
             if (typeof messageId === 'string') {
               if (replaySeen.has(messageId)) continue;
-              if (replaySeen.size >= REPLAY_SEEN_LIMIT) replaySeen.clear();
-              replaySeen.add(messageId);
+              replaySeen.add(messageId, item.offsetMs, scheduler.resumePositionMs());
             }
             onChatUpdate(item.action);
           }

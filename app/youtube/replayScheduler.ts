@@ -184,3 +184,46 @@ export class ReplayScheduler<T = unknown> {
     return this.exhaustedPages && this.buffer.length === 0;
   }
 }
+
+/**
+ * Bounded memory of replay message ids already released (W6 review F1).
+ * A plain Set that is cleared when full forgets the ids at the resume
+ * boundary, and the provider re-returns boundary items on a seek — so a
+ * reconnect right after the clear re-emits them. This keeps insertion order
+ * (= release order) and, when over the target size, evicts only ids whose
+ * offset is *before* the current resume boundary; ids at or after it are
+ * kept regardless of size because they are exactly the ones a seek can bring
+ * back.
+ */
+export class ReplaySeenIds {
+  private readonly entries = new Map<string, number>();
+
+  constructor(private readonly targetSize: number) {
+    if (!Number.isInteger(targetSize) || targetSize < 1) throw new RangeError('target_size_invalid');
+  }
+
+  get size(): number {
+    return this.entries.size;
+  }
+
+  has(id: string): boolean {
+    return this.entries.has(id);
+  }
+
+  /**
+   * Records a released id. `resumeBoundaryMs` is the scheduler's current
+   * resume position: everything before it may be evicted, nothing at or
+   * after it is.
+   */
+  add(id: string, offsetMs: number, resumeBoundaryMs: number): void {
+    this.entries.set(id, offsetMs);
+    if (this.entries.size <= this.targetSize) return;
+    // Insertion order = release order; walk from the oldest.
+    const ordered = Array.from(this.entries.entries());
+    for (const [seenId, seenOffset] of ordered) {
+      if (this.entries.size <= this.targetSize) break;
+      if (seenOffset >= resumeBoundaryMs) continue;
+      this.entries.delete(seenId);
+    }
+  }
+}
