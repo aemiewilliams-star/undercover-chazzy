@@ -171,6 +171,7 @@ export default function useChzzkVideoChat(
       let nextOffsetMs: number | null = scheduler.startOffsetMs;
       let fetchInFlight = false;
       let lastFetchAt = 0;
+      let drainedPositionMs = scheduler.startOffsetMs;
       diag({ at: 'chzzk_video_connect', attempt: reconnectAttempt, startOffsetMs: scheduler.startOffsetMs });
 
       const fetchMore = async () => {
@@ -205,7 +206,7 @@ export default function useChzzkVideoChat(
           }
         } catch (error) {
           if (disposed || generation !== currentGeneration) return;
-          resumeOffsetMs = scheduler.positionMs(Date.now());
+          resumeOffsetMs = drainedPositionMs;
           const message = error instanceof Error ? error.message : '';
           // 404 means the video (or its chat) is gone: no point retrying.
           if (message === 'chzzk_proxy_404') {
@@ -228,6 +229,8 @@ export default function useChzzkVideoChat(
             lastMessageAt = now;
             chatRef.current(item.action);
           }
+          // Resume only within the fetched prefix whose due items were delivered.
+          drainedPositionMs = Math.min(scheduler.positionMs(now), nextOffsetMs ?? scheduler.positionMs(now));
           // Pages are fetched minutes ahead; buffered playback counts as the provider being alive.
           if (scheduler.bufferedCount > 0) lastProviderSuccessAt = now;
           if (scheduler.finished()) {

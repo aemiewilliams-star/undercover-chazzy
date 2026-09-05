@@ -16,6 +16,8 @@ export const CHZZK_VIDEO_NO = /^[0-9]{1,12}$/;
 
 export interface ChzzkVideoChatPage {
   items: ReplayScheduledItem<ChzzkChatItem>[];
+  /** Provider entries before hidden/system filtering. */
+  sourceCount: number;
   /** Offset to request next; null when the video's chat is exhausted. */
   nextPlayerMessageTime: number | null;
 }
@@ -45,17 +47,18 @@ export function chzzkVideoChatPage(content: unknown): ChzzkVideoChatPage | null 
     if (item != null) items.push({ offsetMs, action: item });
   }
   const next = finiteNonNegativeInteger(page.nextPlayerMessageTime);
-  return { items, nextPlayerMessageTime: next };
+  return { items, sourceCount: page.videoChats.length, nextPlayerMessageTime: next };
 }
 
 /**
  * The offset to fetch after a page. Exhausted when the API says so (null),
- * when the page brought nothing, or when the cursor does not move forward —
+ * when the raw page is empty, or when the cursor does not move forward —
  * the last guard keeps a stuck cursor from spinning on the same page.
  */
 export function chzzkVideoChatNextOffset(page: ChzzkVideoChatPage, requestedOffsetMs: number): number | null {
   if (page.nextPlayerMessageTime == null) return null;
-  if (page.items.length === 0) return null;
+  // A filtered-empty page can still point to later visible messages.
+  if (page.sourceCount === 0) return null;
   if (page.nextPlayerMessageTime <= requestedOffsetMs) return null;
   return page.nextPlayerMessageTime;
 }

@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
-    "lint:collector": "eslint middleware.ts app/layout.tsx app/global-error.tsx app/chzzk/useChatList.ts app/chzzk/chzzkChatProtocol.ts app/chzzk/chzzkChatProtocol.test.ts app/chzzk/useChzzkLiveChat.ts app/chzzk/chzzkVideoChat.ts app/chzzk/chzzkVideoChat.test.ts app/chzzk/useChzzkVideoChat.ts app/chzzk-api app/collector app/youtube app/youtubei app/sw.js_data",
+    "lint:collector": "eslint middleware.ts app/layout.tsx app/global-error.tsx app/chzzk/useChatList.ts app/chzzk/chzzkChatProtocol.ts app/chzzk/chzzkChatProtocol.test.ts app/chzzk/useChzzkLiveChat.ts app/chzzk/chzzkVideoChat.ts app/chzzk/chzzkVideoChat.test.ts app/chzzk/useChzzkVideoChat.ts app/chzzk/useChzzkVideoChat.crosscheck.test.ts app/chzzk-api app/collector app/youtube app/youtubei app/sw.js_data",
     "test:collector": "tsx --test app/collector/*.test.ts app/youtube/*.test.ts app/chzzk/*.test.ts"
   },
   "dependencies": {
