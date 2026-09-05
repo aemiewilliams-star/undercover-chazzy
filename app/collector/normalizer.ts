@@ -22,8 +22,11 @@ const MENTION = /(^|\s)@[A-Za-z0-9_.-]{2,64}/g;
 export function normalizeMessageRuns(runs: MessageRun[] | undefined): string {
   const raw = (runs ?? [])
     .map((run) => {
-      if (typeof run.text === 'string') return run.text;
+      // Emoji first: replay pages put the custom emoji's resource id into
+      // `text` next to `emoji`, which leaked ids like "UC…/2sIf…" into the
+      // chat text (first recorded-broadcast device test, 2026-09-05).
       if (run.emoji != null) return '[이모지]';
+      if (typeof run.text === 'string') return run.text;
       return '';
     })
     .join('');

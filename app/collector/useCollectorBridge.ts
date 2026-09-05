@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { COLLECTOR_BRIDGE_VERSION, CollectorPlatformStatusMessage, CollectorRuntimeConfig } from './contracts';
+import { CollectorPlatformStatusMessage, CollectorRuntimeConfig, collectorBridgeEnvelope } from './contracts';
 import { NormalizedCollectorEvent } from './normalizer';
 import { CollectorEventQueue, COLLECTOR_BATCH_MAX_EVENTS } from './queue';
 import { sendCollectorBridgeMessage } from './bridgeTransport';
@@ -58,8 +58,7 @@ export default function useCollectorBridge(config: CollectorRuntimeConfig | null
     flushingRef.current = true;
     const delivered = await sendCollectorBridgeMessage({
       type: 'batch',
-      bridgeVersion: COLLECTOR_BRIDGE_VERSION,
-      ...runtimeConfig,
+      ...collectorBridgeEnvelope(runtimeConfig),
       batchSequence: batchSequenceRef.current,
       events,
     });
@@ -94,8 +93,7 @@ export default function useCollectorBridge(config: CollectorRuntimeConfig | null
       if (runtimeConfig == null) return false;
       const delivered = await sendCollectorBridgeMessage({
         type: 'platform_status',
-        bridgeVersion: COLLECTOR_BRIDGE_VERSION,
-        ...runtimeConfig,
+        ...collectorBridgeEnvelope(runtimeConfig),
         status,
         ...(code == null ? {} : { code }),
       });
@@ -109,8 +107,7 @@ export default function useCollectorBridge(config: CollectorRuntimeConfig | null
     if (config == null) return;
     void sendCollectorBridgeMessage({
       type: 'ready',
-      bridgeVersion: COLLECTOR_BRIDGE_VERSION,
-      ...config,
+      ...collectorBridgeEnvelope(config),
     }).then((delivered) => updateQueueStats(delivered));
   }, [config, updateQueueStats]);
 
@@ -147,8 +144,7 @@ export default function useCollectorBridge(config: CollectorRuntimeConfig | null
       const currentHealth = healthRef.current;
       void sendCollectorBridgeMessage({
         type: 'heartbeat',
-        bridgeVersion: COLLECTOR_BRIDGE_VERSION,
-        ...runtimeConfig,
+        ...collectorBridgeEnvelope(runtimeConfig),
         emittedAt: now,
         liveness: currentHealth.liveness,
         lastProviderPollStartedAt: currentHealth.lastProviderPollStartedAt,

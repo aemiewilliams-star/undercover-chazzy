@@ -71,3 +71,16 @@ void test('implausible timestamps fall back to collector receive time', () => {
     timingSource: 'collector_received',
   });
 });
+
+void test('an emoji run that also carries a resource id in text still becomes the placeholder', () => {
+  assert.equal(
+    normalizeMessageRuns([
+      { text: '파병이 왠말이냐고' },
+      {
+        text: 'UCkszU2WH9gy1mb0dV-11UJg/2sIfY8vIG8z96ALulYDQDQ',
+        emoji: { emoji_id: 'x', image: [{ url: 'https://image' }] },
+      },
+    ]),
+    '파병이 왠말이냐고[이모지]',
+  );
+});

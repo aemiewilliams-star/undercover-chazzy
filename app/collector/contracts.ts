@@ -25,7 +25,7 @@ export interface CollectorEvent {
   platform: typeof COLLECTOR_PLATFORM;
 }
 
-interface CollectorBridgeBase {
+export interface CollectorBridgeBase {
   bridgeVersion: typeof COLLECTOR_BRIDGE_VERSION;
   collectorRunId: string;
   bridgeToken: string;
@@ -85,6 +85,20 @@ export interface CollectorRuntimeConfig {
   bridgeToken: string;
   collectorRunId: string;
   playback?: CollectorPlayback;
+}
+
+/**
+ * The envelope every bridge message carries. Only these three keys: the app
+ * checks message keys exactly, so spreading the whole runtime config (which
+ * may carry `playback`) makes it refuse ready, heartbeat and batch alike
+ * (first recorded-broadcast device test, 2026-09-05).
+ */
+export function collectorBridgeEnvelope(config: CollectorRuntimeConfig): CollectorBridgeBase {
+  return {
+    bridgeVersion: COLLECTOR_BRIDGE_VERSION,
+    bridgeToken: config.bridgeToken,
+    collectorRunId: config.collectorRunId,
+  };
 }
 
 export function isCollectorPlayback(value: unknown): value is CollectorPlayback {
