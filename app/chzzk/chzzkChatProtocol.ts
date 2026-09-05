@@ -89,6 +89,36 @@ export function parseChzzkFrame(raw: unknown): ChzzkFrame | null {
   return { cmd: frame.cmd, body: frame.bdy };
 }
 
+/**
+ * One chat record → item, shared by the live socket frames (`msg`,
+ * `msgTypeCode`, `msgStatusType`, `msgTime`) and the VOD chat pages
+ * (`content`, `messageTypeCode`, `messageStatusType`, `messageTime`): the
+ * same rules decide what is a text chat (type 1, or a cheese chat whose
+ * donationType is CHAT), what is hidden, and which profile field is the
+ * opaque author key.
+ */
+export function chzzkChatItemFromFields(fields: {
+  statusType: unknown;
+  typeCode: unknown;
+  extras: unknown;
+  profile: unknown;
+  message: unknown;
+  time: unknown;
+}): ChzzkChatItem | null {
+  if (fields.statusType === 'HIDDEN') return null;
+  const typeCode = fields.typeCode;
+  if (typeCode !== MSG_TYPE_CHAT && typeCode !== MSG_TYPE_CHEESE) return null;
+  const extras = parseJsonRecord(fields.extras);
+  if (typeCode === MSG_TYPE_CHEESE && extras?.donationType !== 'CHAT') return null;
+  const profile = parseJsonRecord(fields.profile);
+  const authorOpaqueKey = typeof profile?.userIdHash === 'string' ? profile.userIdHash : null;
+  if (authorOpaqueKey == null || !/^[A-Za-z0-9_-]{1,128}$/.test(authorOpaqueKey)) return null;
+  const message = typeof fields.message === 'string' ? fields.message : '';
+  const text = message.replace(EMOJI_MARKUP, '[이모지]');
+  const timestamp = typeof fields.time === 'number' && Number.isFinite(fields.time) ? fields.time : null;
+  return { authorOpaqueKey, text, timestamp };
+}
+
 /** Text chats and text-bearing cheese chats from a CHAT / CHEESE_CHAT frame; hidden and system entries dropped. */
 export function chzzkChatItemsFromBody(body: unknown): ChzzkChatItem[] {
   if (!Array.isArray(body)) return [];
@@ -96,18 +126,20 @@ export function chzzkChatItemsFromBody(body: unknown): ChzzkChatItem[] {
   for (const entry of body) {
     const chat = record(entry);
     if (chat == null) continue;
-    if (chat.msgStatusType === 'HIDDEN') continue;
-    const typeCode = chat.msgTypeCode;
-    if (typeCode !== MSG_TYPE_CHAT && typeCode !== MSG_TYPE_CHEESE) continue;
-    const extras = parseJsonRecord(chat.extras);
-    if (typeCode === MSG_TYPE_CHEESE && extras?.donationType !== 'CHAT') continue;
-    const profile = parseJsonRecord(chat.profile);
-    const authorOpaqueKey = typeof profile?.userIdHash === 'string' ? profile.userIdHash : null;
-    if (authorOpaqueKey == null || !/^[A-Za-z0-9_-]{1,128}$/.test(authorOpaqueKey)) continue;
-    const message = typeof chat.msg === 'string' ? chat.msg : '';
-    const text = message.replace(EMOJI_MARKUP, '[이모지]');
-    const timestamp = typeof chat.msgTime === 'number' && Number.isFinite(chat.msgTime) ? chat.msgTime : null;
-    items.push({ authorOpaqueKey, text, timestamp });
+    const item = chzzkChatItemFromFields({
+      statusType: chat.msgStatusType,
+      typeCode: chat.msgTypeCode,
+      extras: chat.extras,
+      profile: chat.profile,
+      message: chat.msg,
+      time: chat.msgTime,
+    });
+    if (item != null) items.push(item);
   }
   return items;
+}
+
+/** Shared with the VOD parser; exported so it is not duplicated there. */
+export function chzzkRecord(value: unknown): Record<string, unknown> | null {
+  return record(value);
 }

@@ -12,6 +12,7 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
 export const CHZZK_PROXY_TIMEOUT_MS = 8_000;
 
 const CHANNEL_ID = '[a-f0-9]{32}';
+const VIDEO_NO = '[0-9]{1,12}';
 
 interface ChzzkProxyRule {
   pattern: RegExp;
@@ -32,6 +33,25 @@ const RULES: readonly ChzzkProxyRule[] = [
     upstreamOrigin: 'https://api.chzzk.naver.com',
     upstreamPath: (match) => `/polling/v2/channels/${match[1]}/live-status`,
     query: (search) => (search.size === 0 ? new URLSearchParams() : null),
+  },
+  {
+    // VOD metadata: type (REPLAY/UPLOAD), duration, chat enabled, channel.
+    pattern: new RegExp(`^/chzzk-api/service/v2/videos/(${VIDEO_NO})$`),
+    upstreamOrigin: 'https://api.chzzk.naver.com',
+    upstreamPath: (match) => `/service/v2/videos/${match[1]}`,
+    query: (search) => (search.size === 0 ? new URLSearchParams() : null),
+  },
+  {
+    // VOD chat page at a video offset (ms). Forward paging only: the page
+    // asks with the scheduler position and follows nextPlayerMessageTime.
+    pattern: new RegExp(`^/chzzk-api/service/v1/videos/(${VIDEO_NO})/chats$`),
+    upstreamOrigin: 'https://api.chzzk.naver.com',
+    upstreamPath: (match) => `/service/v1/videos/${match[1]}/chats`,
+    query: (search) => {
+      const offset = search.get('playerMessageTime');
+      if (search.size !== 1 || offset == null || !/^(0|[1-9][0-9]{0,8})$/.test(offset)) return null;
+      return new URLSearchParams({ playerMessageTime: offset });
+    },
   },
   {
     pattern: /^\/chzzk-api\/nng_main\/v1\/chats\/access-token$/,

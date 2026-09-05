@@ -58,3 +58,50 @@ void test('upstream response headers are reduced to a safe JSON subset', () => {
   assert.equal(headers.get('cache-control'), 'private, no-store, max-age=0');
   assert.equal(safeChzzkResponseHeaders(new Headers({ 'content-type': 'text/html' })).get('content-type'), null);
 });
+
+void test('VOD routes: metadata without query, chat page with exactly one non-negative integer offset', () => {
+  const base = 'https://collector.example';
+  const url = (path: string) => new URL(path, base);
+  assert.equal(
+    chzzkUpstreamUrl(
+      url('/chzzk-api/service/v2/videos/15031050'),
+      '/chzzk-api/service/v2/videos/15031050',
+      'GET',
+    ).toString(),
+    'https://api.chzzk.naver.com/service/v2/videos/15031050',
+  );
+  assert.equal(
+    chzzkUpstreamUrl(
+      url('/chzzk-api/service/v1/videos/15031050/chats?playerMessageTime=0'),
+      '/chzzk-api/service/v1/videos/15031050/chats',
+      'GET',
+    ).toString(),
+    'https://api.chzzk.naver.com/service/v1/videos/15031050/chats?playerMessageTime=0',
+  );
+  assert.equal(
+    chzzkUpstreamUrl(
+      url('/chzzk-api/service/v1/videos/15031050/chats?playerMessageTime=7200000'),
+      '/chzzk-api/service/v1/videos/15031050/chats',
+      'GET',
+    ).search,
+    '?playerMessageTime=7200000',
+  );
+  for (const [path, search] of [
+    ['/chzzk-api/service/v2/videos/15031050', '?x=1'],
+    ['/chzzk-api/service/v2/videos/0123456789012', ''],
+    ['/chzzk-api/service/v2/videos/abc', ''],
+    ['/chzzk-api/service/v1/videos/15031050/chats', ''],
+    ['/chzzk-api/service/v1/videos/15031050/chats', '?playerMessageTime=-1'],
+    ['/chzzk-api/service/v1/videos/15031050/chats', '?playerMessageTime=01'],
+    ['/chzzk-api/service/v1/videos/15031050/chats', '?playerMessageTime=1.5'],
+    ['/chzzk-api/service/v1/videos/15031050/chats', '?playerMessageTime=1000000000'],
+    ['/chzzk-api/service/v1/videos/15031050/chats', '?playerMessageTime=0&previousVideoChatSize=50'],
+    ['/chzzk-api/service/v1/videos/15031050/chats/extra', '?playerMessageTime=0'],
+  ] as const) {
+    assert.throws(
+      () => chzzkUpstreamUrl(url(path + search), path, 'GET'),
+      /proxy_(route_not_allowed|request_invalid)/,
+      path + search,
+    );
+  }
+});
