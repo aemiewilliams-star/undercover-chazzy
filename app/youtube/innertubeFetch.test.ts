@@ -5,6 +5,7 @@ import {
   COLLECTOR_PROXY_HEADER_VALUE,
   CollectorProxyConfigurationError,
   createInnertubeFetch,
+  isProviderLivenessRequest,
   resolveCollectorProxyBaseUrl,
   rewriteInnertubeUrl,
 } from './innertubeFetch';
@@ -73,6 +74,65 @@ void test('network exceptions are reported and rethrown', async () => {
       /simulated network failure/,
     );
     assert.equal(failureCount, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+void test('only live chat polls decide provider liveness', () => {
+  assert.equal(isProviderLivenessRequest('https://www.youtube.com/youtubei/v1/live_chat/get_live_chat?key=abc'), true);
+  assert.equal(
+    isProviderLivenessRequest(new URL('https://www.youtube.com/youtubei/v1/live_chat/get_live_chat_replay')),
+    true,
+  );
+  assert.equal(isProviderLivenessRequest('https://www.youtube.com/youtubei/v1/updated_metadata'), false);
+  assert.equal(isProviderLivenessRequest('https://www.youtube.com/youtubei/v1/player'), false);
+  assert.equal(isProviderLivenessRequest(new Request('https://www.youtube.com/youtubei/v1/next')), false);
+  assert.equal(isProviderLivenessRequest('not a url'), true);
+});
+
+void test('a blocked metadata poll is forwarded but does not touch liveness', async () => {
+  const originalFetch = globalThis.fetch;
+  const observed = { started: 0, succeeded: 0, failed: 0 };
+  globalThis.fetch = (input) => {
+    assert.ok(input instanceof Request);
+    assert.equal(new URL(input.url).pathname, '/youtubei/v1/updated_metadata');
+    return Promise.resolve(new Response('{"code":"proxy_route_not_allowed"}', { status: 404 }));
+  };
+
+  try {
+    const collectorFetch = createInnertubeFetch(
+      {
+        onRequestStarted: () => (observed.started += 1),
+        onRequestSucceeded: () => (observed.succeeded += 1),
+        onRequestFailed: () => (observed.failed += 1),
+      },
+      new URL('https://collector-proxy.example'),
+    );
+    const response = await collectorFetch('https://www.youtube.com/youtubei/v1/updated_metadata');
+
+    assert.equal(response.status, 404);
+    assert.deepEqual(observed, { started: 0, succeeded: 0, failed: 0 });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+void test('a metadata network failure is rethrown without a liveness report', async () => {
+  const originalFetch = globalThis.fetch;
+  let failureCount = 0;
+  globalThis.fetch = () => Promise.reject(new TypeError('simulated network failure'));
+
+  try {
+    const collectorFetch = createInnertubeFetch(
+      { onRequestFailed: () => (failureCount += 1) },
+      new URL('https://collector-proxy.example'),
+    );
+    await assert.rejects(
+      collectorFetch('https://www.youtube.com/youtubei/v1/updated_metadata'),
+      /simulated network failure/,
+    );
+    assert.equal(failureCount, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }

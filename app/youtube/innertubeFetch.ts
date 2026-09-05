@@ -4,6 +4,27 @@ export interface ProviderFetchObserver {
   onRequestFailed?: (at: number) => void;
 }
 
+/**
+ * Only the live chat polls decide provider liveness. youtubei.js also polls
+ * `/youtubei/v1/updated_metadata` (title, viewer count) in a tight loop that
+ * the collector proxy does not allow; those 404s must not flip the session to
+ * degraded while chat keeps flowing. Bootstrap calls (player, next) report
+ * their own failure codes from the connect phase.
+ */
+const LIVENESS_REQUEST_PATHS: ReadonlySet<string> = new Set([
+  '/youtubei/v1/live_chat/get_live_chat',
+  '/youtubei/v1/live_chat/get_live_chat_replay',
+]);
+
+export function isProviderLivenessRequest(input: string | Request | RequestInfo | URL): boolean {
+  try {
+    const source = typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(input.url);
+    return LIVENESS_REQUEST_PATHS.has(source.pathname);
+  } catch {
+    return true;
+  }
+}
+
 export const COLLECTOR_PROXY_HEADER = 'x-undercover-collector';
 export const COLLECTOR_PROXY_HEADER_VALUE = 'live-chat-v1';
 
@@ -57,7 +78,8 @@ export function createInnertubeFetch(
 ) {
   return async (input: string | Request | RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const startedAt = Date.now();
-    observer.onRequestStarted?.(startedAt);
+    const observed = isProviderLivenessRequest(input);
+    if (observed) observer.onRequestStarted?.(startedAt);
 
     try {
       const rewritten = rewriteInnertubeUrl(input as string | Request | URL, proxyBaseUrl);
@@ -68,11 +90,13 @@ export function createInnertubeFetch(
       }
       headers.set(COLLECTOR_PROXY_HEADER, COLLECTOR_PROXY_HEADER_VALUE);
       const response = await fetch(new Request(request, { headers }), init == null ? undefined : { ...init, headers });
-      if (response.ok) observer.onRequestSucceeded?.(Date.now());
-      else observer.onRequestFailed?.(Date.now());
+      if (observed) {
+        if (response.ok) observer.onRequestSucceeded?.(Date.now());
+        else observer.onRequestFailed?.(Date.now());
+      }
       return response;
     } catch (error) {
-      observer.onRequestFailed?.(Date.now());
+      if (observed) observer.onRequestFailed?.(Date.now());
       throw error;
     }
   };
