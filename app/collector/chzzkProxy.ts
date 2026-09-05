@@ -87,11 +87,36 @@ export async function boundedChzzkBody(response: Response): Promise<ArrayBuffer>
   const rawLength = response.headers.get('content-length');
   if (rawLength != null) {
     const length = Number(rawLength);
-    if (Number.isFinite(length) && length > MAX_RESPONSE_BYTES) throw new Error('CHZZK_RESPONSE_TOO_LARGE');
+    if (Number.isFinite(length) && length > MAX_RESPONSE_BYTES) {
+      await response.body?.cancel();
+      throw new Error('CHZZK_RESPONSE_TOO_LARGE');
+    }
   }
-  const body = await response.arrayBuffer();
-  if (body.byteLength > MAX_RESPONSE_BYTES) throw new Error('CHZZK_RESPONSE_TOO_LARGE');
-  return body;
+  if (response.body == null) return new ArrayBuffer(0);
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > MAX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new Error('CHZZK_RESPONSE_TOO_LARGE');
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body.buffer;
 }
 
 export function safeChzzkResponseHeaders(upstream: Headers): Headers {
@@ -101,6 +126,7 @@ export function safeChzzkResponseHeaders(upstream: Headers): Headers {
     'x-robots-tag': 'noindex, nofollow',
   });
   const contentType = upstream.get('content-type');
-  if (contentType != null && /^application\/json/i.test(contentType)) headers.set('content-type', contentType);
+  if (contentType != null && /^application\/json(?:\s*;|$)/i.test(contentType))
+    headers.set('content-type', contentType);
   return headers;
 }

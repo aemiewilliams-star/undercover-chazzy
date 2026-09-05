@@ -97,6 +97,7 @@ export default function useChzzkLiveChat(
     let hostIndex = 0;
     let lastProviderPollStartedAt: number | null = null;
     let lastProviderSuccessAt: number | null = null;
+    let socketStartedAt: number | null = null;
     let lastMessageAt: number | null = null;
     let currentLiveness: CollectorLiveness = 'connecting';
     let currentCode: CollectorStatusCode | undefined;
@@ -140,6 +141,8 @@ export default function useChzzkLiveChat(
 
     const failPermanently = (code: CollectorStatusCode) => {
       diag({ at: 'chzzk_fail_permanently', code, attempt: reconnectAttempt });
+      generation += 1;
+      if (reconnectTimer != null) clearTimeout(reconnectTimer);
       reconnectScheduled = false;
       stopSocket();
       emitHealth('failed', code);
@@ -148,6 +151,8 @@ export default function useChzzkLiveChat(
 
     const endStream = () => {
       diag({ at: 'chzzk_stream_ended' });
+      generation += 1;
+      if (reconnectTimer != null) clearTimeout(reconnectTimer);
       reconnectScheduled = false;
       stopSocket();
       emitHealth('failed', 'provider_stream_ended');
@@ -177,6 +182,7 @@ export default function useChzzkLiveChat(
       const currentGeneration = ++generation;
       lastProviderPollStartedAt = null;
       lastProviderSuccessAt = null;
+      socketStartedAt = null;
       emitHealth(reconnectAttempt === 0 ? 'connecting' : 'degraded');
       diag({ at: 'chzzk_connect', attempt: reconnectAttempt });
       let proxyBase: URL;
@@ -217,7 +223,6 @@ export default function useChzzkLiveChat(
           if (disposed || generation !== currentGeneration) return;
           const accessToken = typeof token.accessToken === 'string' ? token.accessToken : '';
           if (accessToken === '') throw new Error('chzzk_token_missing');
-          lastProviderSuccessAt = Date.now();
           phase = 'socket';
           openSocket(chatChannelId, accessToken, currentGeneration, proxyBase);
         } finally {
@@ -236,12 +241,15 @@ export default function useChzzkLiveChat(
     };
 
     const openSocket = (chatChannelId: string, accessToken: string, currentGeneration: number, proxyBase: URL) => {
+      socketStartedAt = Date.now();
+      lastProviderPollStartedAt = socketStartedAt;
       const ws = new WebSocket(CHZZK_CHAT_HOSTS[hostIndex]);
       socket = ws;
       ws.onopen = () => {
         if (disposed || generation !== currentGeneration || socket !== ws) return;
         lastProviderPollStartedAt = Date.now();
         ws.send(chzzkConnectFrame(chatChannelId, accessToken));
+        emitHealth(currentLiveness, currentCode);
       };
       ws.onmessage = (event: MessageEvent) => {
         if (disposed || generation !== currentGeneration || socket !== ws) return;
@@ -258,7 +266,6 @@ export default function useChzzkLiveChat(
               connected = true;
               reconnectAttempt = 0;
               diag({ at: 'chzzk_connected', host: hostIndex });
-              emitHealth('healthy');
               optionsRef.current.onPlatformStatus?.('live');
             }
             break;
@@ -268,12 +275,14 @@ export default function useChzzkLiveChat(
               lastMessageAt = now;
               chatRef.current(item);
             }
-            emitHealth(connected ? 'healthy' : currentLiveness, currentCode);
             break;
           }
           default:
             break;
         }
+        // Quiet channels still receive keepalives. Publish their freshness to
+        // the bridge, and clear a transient socket error after a good frame.
+        emitHealth(connected ? 'healthy' : currentLiveness, connected ? undefined : currentCode);
       };
       ws.onerror = () => {
         if (disposed || generation !== currentGeneration || socket !== ws) return;
@@ -284,17 +293,22 @@ export default function useChzzkLiveChat(
         scheduleReconnect('provider_poll_failed');
       };
       pingTimer = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) ws.send(chzzkPingFrame());
+        if (disposed || generation !== currentGeneration || socket !== ws) return;
+        if (ws.readyState === WebSocket.OPEN) {
+          lastProviderPollStartedAt = Date.now();
+          ws.send(chzzkPingFrame());
+          emitHealth(currentLiveness, currentCode);
+        }
       }, KEEPALIVE_PING_MS);
       statusTimer = setInterval(() => {
-        if (disposed || generation !== currentGeneration) return;
+        if (disposed || generation !== currentGeneration || socket !== ws) return;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-        lastProviderPollStartedAt = Date.now();
         proxyJson(proxyBase, `/chzzk-api/polling/v2/channels/${channelId}/live-status`, controller.signal)
           .then((live) => {
-            if (disposed || generation !== currentGeneration) return;
-            lastProviderSuccessAt = Date.now();
+            if (disposed || generation !== currentGeneration || socket !== ws) return;
+            // Metadata can establish that the stream ended, but cannot prove
+            // that its chat socket is making progress.
             if (live.status !== 'OPEN') endStream();
           })
           .catch(() => {
@@ -306,7 +320,7 @@ export default function useChzzkLiveChat(
 
     const watchdogTimer = setInterval(() => {
       if (disposed || socket == null || reconnectScheduled) return;
-      if (providerHasStalled(lastProviderSuccessAt, lastProviderPollStartedAt, Date.now())) {
+      if (providerHasStalled(lastProviderSuccessAt, socketStartedAt, Date.now())) {
         scheduleReconnect('provider_stalled');
       }
     }, WATCHDOG_INTERVAL_MS);
