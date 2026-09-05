@@ -11,6 +11,25 @@ const REPLAY_SEEN_LIMIT = 5000;
 /** Never fetch replay pages faster than this; a page covers ~15 s of a busy chat. */
 const REPLAY_FETCH_MIN_GAP_MS = 1000;
 
+/** Enum-like markers to the collector's own /collector/diag (see that route). */
+function diag(fields: Record<string, string | number | boolean | undefined>): void {
+  try {
+    const body = JSON.stringify(Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)));
+    if (typeof navigator !== 'undefined' && typeof navigator.sendBeacon === 'function') {
+      navigator.sendBeacon('/collector/diag', new Blob([body], { type: 'application/json' }));
+    } else {
+      void fetch('/collector/diag', {
+        method: 'POST',
+        body,
+        headers: { 'content-type': 'application/json' },
+        keepalive: true,
+      });
+    }
+  } catch {
+    // diagnostics never affect collection
+  }
+}
+
 export interface YoutubeLiveChatHealth {
   liveness: CollectorLiveness;
   lastProviderPollStartedAt: number | null;
@@ -129,6 +148,7 @@ export default function useLiveChat(
     };
 
     const failPermanently = (code: CollectorStatusCode) => {
+      diag({ at: 'fail_permanently', code, attempt: reconnectAttempt });
       reconnectScheduled = false;
       stopActiveLiveChat();
       emitHealth('failed', code);
@@ -137,6 +157,7 @@ export default function useLiveChat(
 
     const scheduleReconnect = (code: CollectorStatusCode) => {
       if (disposed || reconnectScheduled) return;
+      diag({ at: 'schedule_reconnect', code, attempt: reconnectAttempt });
       stopActiveLiveChat();
 
       const delay = reconnectDelayMs(reconnectAttempt);
@@ -203,6 +224,7 @@ export default function useLiveChat(
           }
           if (!scheduler.started) {
             scheduler.start(Date.now());
+            diag({ at: 'replay_first_page', items: scheduler.bufferedCount, exhausted: scheduler.exhausted });
             emitHealth('healthy');
             optionsRef.current.onPlatformStatus?.('live');
           }
@@ -249,6 +271,7 @@ export default function useLiveChat(
 
     const connect = async () => {
       const currentGeneration = ++generation;
+      diag({ at: 'connect', attempt: reconnectAttempt, playback: optionsRef.current.playback?.kind ?? 'live' });
       lastProviderPollStartedAt = null;
       lastProviderSuccessAt = null;
       emitHealth(reconnectAttempt === 0 ? 'connecting' : 'degraded');
@@ -288,6 +311,16 @@ export default function useLiveChat(
         if (disposed || generation !== currentGeneration) return;
 
         const playback = optionsRef.current.playback;
+        diag({
+          at: 'got_info',
+          playback: playback?.kind ?? 'live',
+          startOffsetMs: playback?.startOffsetMs,
+          isLive: info.basic_info.is_live === true,
+          livechat: info.livechat != null,
+          replay: info.livechat?.is_replay === true,
+          continuation: typeof info.livechat?.continuation === 'string',
+          attempt: reconnectAttempt,
+        });
         if (playback?.kind === 'recorded') {
           phase = 'start';
           const continuation = info.livechat?.continuation;
