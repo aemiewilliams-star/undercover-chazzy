@@ -2,6 +2,8 @@ export const COLLECTOR_BRIDGE_VERSION = 1 as const;
 export const COLLECTOR_BRIDGE_HANDLER = 'undercoverLiveChatCollector';
 export const COLLECTOR_BOOTSTRAP_HANDLER = 'undercoverLiveChatCollectorBootstrap';
 export const COLLECTOR_PLATFORM = 'youtube' as const;
+/** Platforms a collector page can read chat from (owner decision 2026-09-05: CHZZK next). */
+export type CollectorPlatform = 'youtube' | 'chzzk';
 
 export type CollectorLiveness = 'connecting' | 'healthy' | 'degraded' | 'failed';
 
@@ -22,7 +24,7 @@ export interface CollectorEvent {
   timingSource: 'provider' | 'collector_received';
   authorOpaqueKey: string;
   normalizedText: string;
-  platform: typeof COLLECTOR_PLATFORM;
+  platform: CollectorPlatform;
 }
 
 export interface CollectorBridgeBase {

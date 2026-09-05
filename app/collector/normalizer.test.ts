@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { normalizeMessageRuns, normalizeProviderTimestamp, normalizeYoutubeTextMessage } from './normalizer';
+import {
+  normalizeChzzkTextMessage,
+  normalizeMessageRuns,
+  normalizeProviderTimestamp,
+  normalizeYoutubeTextMessage,
+} from './normalizer';
 
 void test('normalizer removes direct identifiers without reading author profile fields', () => {
   const normalized = normalizeMessageRuns([
@@ -83,4 +88,40 @@ void test('an emoji run that also carries a resource id in text still becomes th
     ]),
     '파병이 왠말이냐고[이모지]',
   );
+});
+
+void test('CHZZK chats normalize like YouTube ones and carry the chzzk platform', () => {
+  const now = 1788594530507;
+  const ok = normalizeChzzkTextMessage({
+    authorOpaqueKey: 'a1b2c3d4e5f6',
+    text: '  문의 https://x.y/z  {:x:} 010-1234-5678 ',
+    timestamp: now - 1000,
+    collectorReceivedAt: now,
+  });
+  assert.equal(ok.ok, true);
+  if (ok.ok) {
+    assert.equal(ok.event.platform, 'chzzk');
+    assert.equal(ok.event.normalizedText, '문의 [URL] {:x:} [전화번호]');
+    assert.equal(ok.event.occurredAt, now - 1000);
+    assert.equal(ok.event.timingSource, 'provider');
+  }
+  assert.deepEqual(
+    normalizeChzzkTextMessage({ authorOpaqueKey: '', text: 'x', timestamp: now, collectorReceivedAt: now }),
+    { ok: false, reason: 'author_missing' },
+  );
+  assert.deepEqual(
+    normalizeChzzkTextMessage({ authorOpaqueKey: 'bad id', text: 'x', timestamp: now, collectorReceivedAt: now }),
+    { ok: false, reason: 'author_invalid' },
+  );
+  assert.deepEqual(
+    normalizeChzzkTextMessage({ authorOpaqueKey: 'a1', text: '   ', timestamp: now, collectorReceivedAt: now }),
+    { ok: false, reason: 'text_empty' },
+  );
+  const stale = normalizeChzzkTextMessage({
+    authorOpaqueKey: 'a1',
+    text: 'x',
+    timestamp: 'nope',
+    collectorReceivedAt: now,
+  });
+  assert.equal(stale.ok && stale.event.timingSource, 'collector_received');
 });

@@ -17,7 +17,9 @@ export function middleware(request: NextRequest) {
   const isCollectorPath = request.nextUrl.pathname.startsWith('/collector/');
   const isEnabledProxyPath =
     process.env.COLLECTOR_PROXY_ENABLED === '1' &&
-    (request.nextUrl.pathname === '/sw.js_data' || request.nextUrl.pathname.startsWith('/youtubei/'));
+    (request.nextUrl.pathname === '/sw.js_data' ||
+      request.nextUrl.pathname.startsWith('/youtubei/') ||
+      request.nextUrl.pathname.startsWith('/chzzk-api/'));
   if (process.env.COLLECTOR_ONLY_MODE === '1' && !isCollectorPath && !isEnabledProxyPath) {
     const notFound = new NextResponse('Not Found', { status: 404 });
     notFound.headers.set('Cache-Control', 'private, no-store, max-age=0');
@@ -29,11 +31,16 @@ export function middleware(request: NextRequest) {
 
   const nonce = btoa(crypto.randomUUID());
   const devEval = process.env.NODE_ENV === 'development' ? "'unsafe-eval'" : '';
+  // CHZZK chat is a WebSocket the page opens directly (owner decision
+  // 2026-09-05: webview collection); only the CHZZK collector pages get it.
+  const chzzkChatOrigins = request.nextUrl.pathname.startsWith('/collector/chzzk/')
+    ? ' wss://kr-ss1.chat.naver.com wss://kr-ss2.chat.naver.com wss://kr-ss3.chat.naver.com'
+    : '';
   const csp = `
     default-src 'none';
     script-src 'self' 'nonce-${nonce}' 'strict-dynamic' ${devEval};
     style-src 'self';
-    connect-src 'self' ${collectorProxyOrigin()};
+    connect-src 'self' ${collectorProxyOrigin()}${chzzkChatOrigins};
     img-src 'self' data:;
     font-src 'self';
     worker-src 'none';
