@@ -20,6 +20,13 @@ export interface ChzzkVideoChatPage {
   sourceCount: number;
   /** Offset to request next; null when the video's chat is exhausted. */
   nextPlayerMessageTime: number | null;
+  /**
+   * Highest video offset this page confirms, read from the raw entries before
+   * hidden/system filtering (design v4 §3-2): `nextPlayerMessageTime` when the
+   * provider gives one, else the last raw entry's offset, else null (nothing
+   * confirmed — the caller keeps its previous cover).
+   */
+  coverMs: number | null;
 }
 
 function finiteNonNegativeInteger(value: unknown): number | null {
@@ -31,11 +38,13 @@ export function chzzkVideoChatPage(content: unknown): ChzzkVideoChatPage | null 
   const page = chzzkRecord(content);
   if (page == null || !Array.isArray(page.videoChats)) return null;
   const items: ReplayScheduledItem<ChzzkChatItem>[] = [];
+  let lastRawOffsetMs: number | null = null;
   for (const entry of page.videoChats) {
     const chat = chzzkRecord(entry);
     if (chat == null) continue;
     const offsetMs = finiteNonNegativeInteger(chat.playerMessageTime);
     if (offsetMs == null) continue;
+    if (lastRawOffsetMs == null || offsetMs > lastRawOffsetMs) lastRawOffsetMs = offsetMs;
     const item = chzzkChatItemFromFields({
       statusType: chat.messageStatusType,
       typeCode: chat.messageTypeCode,
@@ -47,7 +56,7 @@ export function chzzkVideoChatPage(content: unknown): ChzzkVideoChatPage | null 
     if (item != null) items.push({ offsetMs, action: item });
   }
   const next = finiteNonNegativeInteger(page.nextPlayerMessageTime);
-  return { items, sourceCount: page.videoChats.length, nextPlayerMessageTime: next };
+  return { items, sourceCount: page.videoChats.length, nextPlayerMessageTime: next, coverMs: next ?? lastRawOffsetMs };
 }
 
 /**

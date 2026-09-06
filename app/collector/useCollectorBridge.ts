@@ -1,7 +1,13 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { CollectorPlatformStatusMessage, CollectorRuntimeConfig, collectorBridgeEnvelope } from './contracts';
+import {
+  CollectorPlatformStatusMessage,
+  CollectorReplayStatusMessage,
+  CollectorRuntimeConfig,
+  collectorBridgeEnvelope,
+  replayStatusEnabled,
+} from './contracts';
 import { NormalizedCollectorEvent } from './normalizer';
 import { CollectorEventQueue, COLLECTOR_BATCH_MAX_EVENTS } from './queue';
 import { sendCollectorBridgeMessage } from './bridgeTransport';
@@ -103,6 +109,37 @@ export default function useCollectorBridge(config: CollectorRuntimeConfig | null
     [updateQueueStats],
   );
 
+  /**
+   * `replay_status` (work list W7, design v4 §4-2/§4-3): sent only when the
+   * app advertised `replay-status-v1` in its bootstrap answer — an older app
+   * rejects unknown message types, so without the feature nothing is sent and
+   * batch/heartbeat/platform_status flow exactly as before. `code` exists only
+   * with `failed`; otherwise the key is omitted.
+   */
+  const emitReplayStatus = useCallback(
+    async (
+      status: Omit<CollectorReplayStatusMessage, keyof ReturnType<typeof collectorBridgeEnvelope> | 'type' | 'code'>,
+      code?: CollectorReplayStatusMessage['code'],
+    ) => {
+      const runtimeConfig = configRef.current;
+      if (runtimeConfig == null || !replayStatusEnabled(runtimeConfig)) return false;
+      const delivered = await sendCollectorBridgeMessage({
+        type: 'replay_status',
+        ...collectorBridgeEnvelope(runtimeConfig),
+        replayState: status.replayState,
+        positionMs: status.positionMs,
+        coveredOffsetMs: status.coveredOffsetMs,
+        bufferedAheadMs: status.bufferedAheadMs,
+        bufferedCount: status.bufferedCount,
+        replayWaitMs: status.replayWaitMs,
+        replayWaitCount: status.replayWaitCount,
+        ...(status.replayState === 'failed' && code != null ? { code } : {}),
+      });
+      return delivered;
+    },
+    [],
+  );
+
   useEffect(() => {
     if (config == null) return;
     void sendCollectorBridgeMessage({
@@ -165,5 +202,5 @@ export default function useCollectorBridge(config: CollectorRuntimeConfig | null
     };
   }, [flush, updateQueueStats]);
 
-  return { enqueue, recordNormalizationDrop, emitPlatformStatus, flush, stats };
+  return { enqueue, recordNormalizationDrop, emitPlatformStatus, emitReplayStatus, flush, stats };
 }

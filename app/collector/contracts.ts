@@ -64,11 +64,35 @@ export interface CollectorPlatformStatusMessage extends CollectorBridgeBase {
   code?: CollectorStatusCode;
 }
 
+/**
+ * Recorded playback state (work list W7, design v4 §4-3). Sent only when the
+ * app advertised `replay-status-v1` in its bootstrap answer; the app checks
+ * message keys exactly, so every field below is required except `code`,
+ * which exists only with `failed` and is omitted (never null) otherwise.
+ */
+export type CollectorReplayState = 'prefilling' | 'playing' | 'catching_up' | 'ended' | 'failed';
+
+export interface CollectorReplayStatusMessage extends CollectorBridgeBase {
+  type: 'replay_status';
+  replayState: CollectorReplayState;
+  positionMs: number;
+  coveredOffsetMs: number;
+  bufferedAheadMs: number;
+  bufferedCount: number;
+  replayWaitMs: number;
+  replayWaitCount: number;
+  code?: CollectorStatusCode;
+}
+
 export type CollectorBridgeMessage =
   | CollectorReadyMessage
   | CollectorBatchMessage
   | CollectorHeartbeatMessage
-  | CollectorPlatformStatusMessage;
+  | CollectorPlatformStatusMessage
+  | CollectorReplayStatusMessage;
+
+/** Bootstrap feature the app advertises to receive `replay_status` (design v4 §4-2). */
+export const COLLECTOR_REPLAY_STATUS_FEATURE = 'replay-status-v1';
 
 /**
  * Recorded playback: the broadcast has ended and the channel kept its chat
@@ -87,6 +111,13 @@ export interface CollectorRuntimeConfig {
   bridgeToken: string;
   collectorRunId: string;
   playback?: CollectorPlayback;
+  /** Optional bridge features the app supports (unknown names are ignored, never an error). */
+  features?: string[];
+}
+
+/** True when the app asked for `replay_status` messages; older apps (no features) get none. */
+export function replayStatusEnabled(config: CollectorRuntimeConfig | null): boolean {
+  return config?.features?.includes(COLLECTOR_REPLAY_STATUS_FEATURE) === true;
 }
 
 /**
@@ -128,6 +159,15 @@ export function isCollectorRuntimeConfig(value: unknown): value is CollectorRunt
     candidate.collectorRunId.length <= 128 &&
     safeId.test(candidate.bridgeToken) &&
     safeId.test(candidate.collectorRunId) &&
-    (candidate.playback === undefined || isCollectorPlayback(candidate.playback))
+    (candidate.playback === undefined || isCollectorPlayback(candidate.playback)) &&
+    (candidate.features === undefined || isFeatureList(candidate.features))
+  );
+}
+
+function isFeatureList(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) &&
+    value.length <= 32 &&
+    value.every((entry) => typeof entry === 'string' && /^[a-z0-9-]{1,64}$/.test(entry))
   );
 }

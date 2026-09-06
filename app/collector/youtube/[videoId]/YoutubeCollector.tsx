@@ -34,7 +34,10 @@ export default function YoutubeCollector({ videoId }: { videoId: string }) {
   const bootstrap = useCollectorBootstrap();
   const [health, setHealth] = useState<YoutubeLiveChatHealth>(INITIAL_HEALTH);
   const runtimeConfig = bootstrap.status === 'ready' ? bootstrap.config : null;
-  const { enqueue, recordNormalizationDrop, emitPlatformStatus, stats } = useCollectorBridge(runtimeConfig, health);
+  const { enqueue, recordNormalizationDrop, emitPlatformStatus, emitReplayStatus, stats } = useCollectorBridge(
+    runtimeConfig,
+    health,
+  );
   const publishedSourceUrl = sourceCodeUrl();
 
   const playback = runtimeConfig?.playback;
@@ -69,10 +72,17 @@ export default function YoutubeCollector({ videoId }: { videoId: string }) {
     },
     [emitPlatformStatus],
   );
+  const handleReplayStatus = useCallback(
+    (status: Parameters<typeof emitReplayStatus>[0], code?: Parameters<typeof emitReplayStatus>[1]) => {
+      void emitReplayStatus(status, code);
+    },
+    [emitReplayStatus],
+  );
 
   useLiveChat(runtimeConfig == null ? undefined : videoId, handleChatUpdate, handleMetadataUpdate, {
     onHealthUpdate: setHealth,
     onPlatformStatus: handlePlatformStatus,
+    onReplayStatus: handleReplayStatus,
     playback,
   });
 

@@ -38,7 +38,10 @@ export default function ChzzkVideoCollector({ videoNo }: { videoNo: string }) {
   const bootstrap = useCollectorBootstrap();
   const [health, setHealth] = useState<ChzzkVideoChatHealth>(INITIAL_HEALTH);
   const runtimeConfig = bootstrap.status === 'ready' ? bootstrap.config : null;
-  const { enqueue, recordNormalizationDrop, emitPlatformStatus, stats } = useCollectorBridge(runtimeConfig, health);
+  const { enqueue, recordNormalizationDrop, emitPlatformStatus, emitReplayStatus, stats } = useCollectorBridge(
+    runtimeConfig,
+    health,
+  );
   const publishedSourceUrl = sourceCodeUrl();
 
   const handleChat = useCallback(
@@ -65,10 +68,17 @@ export default function ChzzkVideoCollector({ videoNo }: { videoNo: string }) {
     },
     [emitPlatformStatus],
   );
+  const handleReplayStatus = useCallback(
+    (status: Parameters<typeof emitReplayStatus>[0], code?: Parameters<typeof emitReplayStatus>[1]) => {
+      void emitReplayStatus(status, code);
+    },
+    [emitReplayStatus],
+  );
 
   useChzzkVideoChat(runtimeConfig == null ? undefined : videoNo, runtimeConfig?.playback, handleChat, {
     onHealthUpdate: setHealth,
     onPlatformStatus: handlePlatformStatus,
+    onReplayStatus: handleReplayStatus,
   });
 
   return (

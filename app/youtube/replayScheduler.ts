@@ -79,29 +79,93 @@ export function replayPage(value: unknown): { actions: unknown[]; continuation: 
 }
 
 export const REPLAY_BUFFER_AHEAD_MS = 120_000;
+/**
+ * Work list W7, owner decision ③ (2026-09-06): when the buffer starves the
+ * playback position pauses and resumes once this much confirmed cover lies
+ * ahead of it (or the pages are exhausted). A proposal value, tuned on
+ * measurements (design v4 §3).
+ */
+export const REPLAY_RESUME_AHEAD_MS = 20_000;
+
+export type ReplayState = 'prefilling' | 'playing' | 'catching_up' | 'ended' | 'failed';
+
+/** Snapshot the collector reports as `replay_status` (design v4 §4-3). */
+export interface ReplayStatusSnapshot {
+  replayState: ReplayState;
+  positionMs: number;
+  coveredOffsetMs: number;
+  bufferedAheadMs: number;
+  bufferedCount: number;
+  replayWaitMs: number;
+  replayWaitCount: number;
+}
+
+/** Wait accounting carried into the scheduler a reconnect creates (same run, design v4 §3-1). */
+export interface ReplayWaitCarryOver {
+  replayWaitMs: number;
+  replayWaitCount: number;
+}
+
+/**
+ * Highest video offset a raw YouTube replay page confirms, read before any
+ * filtering: a ReplayChatItemAction carries the offset even when none of its
+ * nested actions survive as chat (design v4 §3-2 — cover is time metadata,
+ * not an item count). Null when the page carries no offset at all (an
+ * actions-empty page with a continuation keeps the previous cover).
+ */
+export function replayPageCoverMs(actions: Iterable<unknown>): number | null {
+  let cover: number | null = null;
+  for (const raw of Array.from(actions)) {
+    if (raw == null || typeof raw !== 'object') continue;
+    const node = raw as LooseNode;
+    if (node.type !== 'ReplayChatItemAction') continue;
+    const offset = finiteNonNegative(node.video_offset_time_msec);
+    if (offset != null && (cover == null || offset > cover)) cover = offset;
+  }
+  return cover;
+}
 
 export class ReplayScheduler<T = unknown> {
   private readonly startOffset: number;
   private readonly aheadMs: number;
+  private readonly resumeAheadMs: number;
+  /** false = the pre-W7 control behaviour (the clock never pauses); measurement arm only. */
+  private readonly pauseOnStarvation: boolean;
   private clockStartMs: number | null = null;
   private buffer: ReplayScheduledItem<T>[] = [];
   private horizonMs: number;
+  /** Confirmed cover (design v4 §3-2): monotonic, starts at the start offset, may trail the position. */
+  private coverMs: number;
   private exhaustedPages = false;
   /** Playback position at the last `due()` call — everything at or before it has been released. */
   private lastDuePositionMs: number | null = null;
+  /** Wall-clock start of the current starvation pause; null while playing. */
+  private pausedSinceMs: number | null = null;
+  /** Wall-clock milliseconds spent paused before the current pause (this run, reconnects included). */
+  private pausedTotalMs: number;
+  private waitCount: number;
 
-  constructor(startOffsetMs: number, aheadMs = REPLAY_BUFFER_AHEAD_MS) {
+  constructor(
+    startOffsetMs: number,
+    aheadMs = REPLAY_BUFFER_AHEAD_MS,
+    options: { resumeAheadMs?: number; carryOver?: ReplayWaitCarryOver; pauseOnStarvation?: boolean } = {},
+  ) {
     if (!Number.isInteger(startOffsetMs) || startOffsetMs < 0) throw new RangeError('start_offset_invalid');
     this.startOffset = startOffsetMs;
     this.aheadMs = aheadMs;
+    this.resumeAheadMs = options.resumeAheadMs ?? REPLAY_RESUME_AHEAD_MS;
+    this.pauseOnStarvation = options.pauseOnStarvation ?? true;
     this.horizonMs = startOffsetMs;
+    this.coverMs = startOffsetMs;
+    this.pausedTotalMs = Math.max(0, Math.floor(options.carryOver?.replayWaitMs ?? 0));
+    this.waitCount = Math.max(0, Math.floor(options.carryOver?.replayWaitCount ?? 0));
   }
 
   get startOffsetMs(): number {
     return this.startOffset;
   }
 
-  /** The session clock starts when the first page has been fetched, not before. */
+  /** The session clock starts when the first page has been fetched, not before (owner decision ①: immediately). */
   start(nowMs: number): void {
     if (this.clockStartMs == null) this.clockStartMs = nowMs;
   }
@@ -110,20 +174,38 @@ export class ReplayScheduler<T = unknown> {
     return this.clockStartMs != null;
   }
 
-  /** Video offset the playback has reached at `nowMs`. */
-  positionMs(nowMs: number): number {
-    if (this.clockStartMs == null) return this.startOffset;
-    return this.startOffset + Math.max(0, nowMs - this.clockStartMs);
+  get paused(): boolean {
+    return this.pausedSinceMs != null;
   }
 
-  /** Feeds one page. Items before the start offset are dropped; the rest are kept in offset order. */
+  /** Video offset the playback has reached at `nowMs`; frozen while paused (owner decision ③). */
+  positionMs(nowMs: number): number {
+    if (this.clockStartMs == null) return this.startOffset;
+    const pausedMs = this.pausedTotalMs + (this.pausedSinceMs == null ? 0 : Math.max(0, nowMs - this.pausedSinceMs));
+    return this.startOffset + Math.max(0, nowMs - this.clockStartMs - pausedMs);
+  }
+
+  /** Feeds one page. Items before the start offset are dropped; the rest are kept in offset order. Items also confirm cover. */
   push(items: readonly ReplayScheduledItem<T>[]): void {
     for (const item of items) {
       this.horizonMs = Math.max(this.horizonMs, item.offsetMs);
+      this.coverMs = Math.max(this.coverMs, item.offsetMs);
       if (item.offsetMs < this.startOffset) continue;
       this.buffer.push(item);
     }
     this.buffer.sort((a, b) => a.offsetMs - b.offsetMs);
+  }
+
+  /**
+   * Confirms that pages have covered the video up to `offsetMs` (provider
+   * time metadata read before filtering: CHZZK nextPlayerMessageTime or the
+   * last raw entry, YouTube raw replay-action offsets). Never moves backwards
+   * and never below the start offset; null (a page without any offset) keeps
+   * the previous cover.
+   */
+  coverTo(offsetMs: number | null): void {
+    if (offsetMs == null || !Number.isFinite(offsetMs)) return;
+    this.coverMs = Math.max(this.coverMs, Math.floor(offsetMs));
   }
 
   /** No further pages exist; playback ends once the buffer drains. */
@@ -139,13 +221,17 @@ export class ReplayScheduler<T = unknown> {
     return this.buffer.length;
   }
 
-  /** True while the buffered horizon is less than `aheadMs` past the playback position. */
-  needsMore(nowMs: number): boolean {
-    if (this.exhaustedPages) return false;
-    return this.horizonMs < this.positionMs(nowMs) + this.aheadMs;
+  get coveredOffsetMs(): number {
+    return this.coverMs;
   }
 
-  /** Highest video offset any fetched page has covered so far. */
+  /** True while the confirmed cover is less than `aheadMs` past the playback position. */
+  needsMore(nowMs: number): boolean {
+    if (this.exhaustedPages) return false;
+    return this.coverMs < this.positionMs(nowMs) + this.aheadMs;
+  }
+
+  /** Highest video offset any fetched item has reached so far (the W6 resume clamp). */
   get fetchedHorizonMs(): number {
     return this.horizonMs;
   }
@@ -156,32 +242,88 @@ export class ReplayScheduler<T = unknown> {
    * releases up to 250 ms behind it and the last page may not have arrived —
    * but the position the last `due()` actually drained, clamped to the
    * fetched horizon so an unreceived page is never skipped. Items released
-   * again after the seek are deduplicated by the caller (message ids).
+   * again after the seek are deduplicated by the caller (message ids). The
+   * confirmed cover is not a seek target (design v4 §3-2).
    */
   resumePositionMs(): number {
     if (this.clockStartMs == null || this.lastDuePositionMs == null) return this.startOffset;
     return Math.min(this.lastDuePositionMs, this.horizonMs);
   }
 
-  /** Releases, in order, every item whose offset the clock has reached. */
+  /**
+   * Releases, in order, every item whose offset the clock has reached, then
+   * applies owner decision ③: starved (nothing buffered, confirmed cover not
+   * past the position, pages not exhausted) → pause the position; paused and
+   * recovered (cover at least `resumeAheadMs` ahead, or exhausted) → resume.
+   */
   due(nowMs: number): ReplayScheduledItem<T>[] {
     if (this.clockStartMs == null) return [];
+    if (this.pausedSinceMs != null) {
+      const position = this.positionMs(nowMs);
+      if (this.exhaustedPages || this.coverMs - position >= this.resumeAheadMs) {
+        this.pausedTotalMs += Math.max(0, nowMs - this.pausedSinceMs);
+        this.pausedSinceMs = null;
+      } else {
+        this.lastDuePositionMs = position;
+        return [];
+      }
+    }
     const position = this.positionMs(nowMs);
     this.lastDuePositionMs = position;
     let count = 0;
     while (count < this.buffer.length && this.buffer[count].offsetMs <= position) count += 1;
-    return this.buffer.splice(0, count);
+    const released = this.buffer.splice(0, count);
+    if (this.pauseOnStarvation && this.buffer.length === 0 && this.coverMs <= position && !this.exhaustedPages) {
+      this.pausedSinceMs = nowMs;
+      this.waitCount += 1;
+    }
+    return released;
   }
 
-  /** Milliseconds until the next buffered item is due; null when nothing is buffered. */
+  /** Milliseconds until the next buffered item is due; null when nothing is buffered or while paused. */
   nextDueInMs(nowMs: number): number | null {
-    if (this.clockStartMs == null || this.buffer.length === 0) return null;
+    if (this.clockStartMs == null || this.buffer.length === 0 || this.pausedSinceMs != null) return null;
     return Math.max(0, this.buffer[0].offsetMs - this.positionMs(nowMs));
   }
 
   /** Playback is over when no pages remain and everything buffered has been released. */
   finished(): boolean {
     return this.exhaustedPages && this.buffer.length === 0;
+  }
+
+  /** Wall-clock milliseconds of policy pauses so far (design v4 `replayWaitMs`). */
+  replayWaitMs(nowMs: number): number {
+    return this.pausedTotalMs + (this.pausedSinceMs == null ? 0 : Math.max(0, nowMs - this.pausedSinceMs));
+  }
+
+  get replayWaitCount(): number {
+    return this.waitCount;
+  }
+
+  carryOver(nowMs: number): ReplayWaitCarryOver {
+    return { replayWaitMs: this.replayWaitMs(nowMs), replayWaitCount: this.waitCount };
+  }
+
+  /** The `replay_status` snapshot (design v4 §4-3); `ended`/`failed` are the hook's to decide. */
+  status(nowMs: number): ReplayStatusSnapshot {
+    const position = this.positionMs(nowMs);
+    const state: ReplayState =
+      this.clockStartMs == null
+        ? 'prefilling'
+        : this.finished()
+          ? 'ended'
+          : this.pausedSinceMs != null
+            ? 'catching_up'
+            : 'playing';
+    return {
+      replayState: state,
+      positionMs: position,
+      coveredOffsetMs: this.coverMs,
+      bufferedAheadMs: Math.max(0, this.coverMs - position),
+      bufferedCount: this.buffer.length,
+      replayWaitMs: this.replayWaitMs(nowMs),
+      replayWaitCount: this.waitCount,
+    };
   }
 }
 

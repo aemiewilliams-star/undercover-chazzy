@@ -3,13 +3,23 @@ import Innertube, { YT, YTNodes } from 'youtubei.js';
 import { CollectorLiveness, CollectorPlayback, CollectorStatusCode } from '../collector/contracts';
 import { CollectorProxyConfigurationError, createInnertubeFetch, ProviderFetchObserver } from './innertubeFetch';
 import { providerHasStalled, reconnectDelayMs } from './liveChatPolicy';
-import { ReplayScheduler, ReplaySeenIds, replayItemsFromPage, replayPage } from './replayScheduler';
+import {
+  ReplayScheduler,
+  ReplaySeenIds,
+  replayItemsFromPage,
+  replayPage,
+  replayPageCoverMs,
+  type ReplayStatusSnapshot,
+  type ReplayWaitCarryOver,
+} from './replayScheduler';
 
 const WATCHDOG_INTERVAL_MS = 2000;
 const REPLAY_TICK_MS = 250;
 const REPLAY_SEEN_LIMIT = 5000;
 /** Never fetch replay pages faster than this; a page covers ~15 s of a busy chat. */
 const REPLAY_FETCH_MIN_GAP_MS = 1000;
+/** Same cadence as the bridge heartbeat (design v4 §4-3: transitions + at least every 5 s while catching up). */
+const REPLAY_STATUS_PUBLISH_MS = 2000;
 
 /** Enum-like markers to the collector's own /collector/diag (see that route). */
 function diag(fields: Record<string, string | number | boolean | undefined>): void {
@@ -42,6 +52,8 @@ export interface YoutubeLiveChatHealth {
 export interface YoutubeLiveChatOptions {
   onHealthUpdate?: (health: YoutubeLiveChatHealth) => void;
   onPlatformStatus?: (status: 'live' | 'ended' | 'unavailable', code?: CollectorStatusCode) => void;
+  /** Recorded playback state (work list W7, design v4 §4-3): on every transition and every REPLAY_STATUS_PUBLISH_MS. */
+  onReplayStatus?: (status: ReplayStatusSnapshot, code?: CollectorStatusCode) => void;
   /** Recorded playback of an ended broadcast; absent means live collection. */
   playback?: CollectorPlayback;
 }
@@ -90,6 +102,23 @@ export default function useLiveChat(
     let replayTimer: ReturnType<typeof setTimeout> | undefined;
     let replayFetchInFlight = false;
     let replayResumeOffsetMs: number | null = null;
+    /** Wait accounting survives reconnects within this run (design v4 §3-1). */
+    let replayWaitCarryOver: ReplayWaitCarryOver | undefined;
+    let lastReplayState: ReplayStatusSnapshot['replayState'] | null = null;
+    let lastReplayStatusAt = 0;
+    const publishReplayStatus = (
+      scheduler: ReplayScheduler<YTNodes.AddChatItemAction>,
+      now: number,
+      force = false,
+      code?: CollectorStatusCode,
+    ) => {
+      const snapshot = scheduler.status(now);
+      const state = code == null ? snapshot.replayState : 'failed';
+      if (!force && state === lastReplayState && now - lastReplayStatusAt < REPLAY_STATUS_PUBLISH_MS) return;
+      lastReplayState = state;
+      lastReplayStatusAt = now;
+      optionsRef.current.onReplayStatus?.({ ...snapshot, replayState: state }, code);
+    };
     // Survives reconnects; evicts only ids before the resume boundary (W6 F1).
     const replaySeen = new ReplaySeenIds(REPLAY_SEEN_LIMIT);
     const collecting = () => activeLiveChat != null || (replayScheduler?.started ?? false);
@@ -162,11 +191,16 @@ export default function useLiveChat(
       // Every reconnect path (fetch failure, stall watchdog, stream end) resumes
       // a recorded playback from the drained position; before W6 the stall path
       // restarted from the URL's start offset.
-      if (replayScheduler != null) replayResumeOffsetMs = replayScheduler.resumePositionMs();
+      if (replayScheduler != null) {
+        replayResumeOffsetMs = replayScheduler.resumePositionMs();
+        replayWaitCarryOver = replayScheduler.carryOver(Date.now());
+      }
       stopActiveLiveChat();
 
       const delay = reconnectDelayMs(reconnectAttempt);
       if (delay == null) {
+        // The replay's last word before the existing platform_status ends it (design v4 §4-2).
+        if (replayScheduler != null) publishReplayStatus(replayScheduler, Date.now(), true, 'reconnect_exhausted');
         failPermanently('reconnect_exhausted');
         return;
       }
@@ -192,8 +226,15 @@ export default function useLiveChat(
       playback: CollectorPlayback,
       currentGeneration: number,
     ) => {
-      const scheduler = new ReplayScheduler<YTNodes.AddChatItemAction>(replayResumeOffsetMs ?? playback.startOffsetMs);
+      const scheduler = new ReplayScheduler<YTNodes.AddChatItemAction>(
+        replayResumeOffsetMs ?? playback.startOffsetMs,
+        undefined,
+        {
+          carryOver: replayWaitCarryOver,
+        },
+      );
       replayScheduler = scheduler;
+      publishReplayStatus(scheduler, Date.now(), true);
       let nextContinuation: string | null = initialContinuation;
       let lastFetchAt = 0;
 
@@ -220,6 +261,10 @@ export default function useLiveChat(
             scheduler.markExhausted();
           } else {
             scheduler.push(replayItemsFromPage<YTNodes.AddChatItemAction>(page.actions));
+            // Cover is read from the raw replay actions, before filtering; an
+            // actions-empty page with a continuation keeps the previous cover
+            // and the loop keeps requesting (design v4 §3-2).
+            scheduler.coverTo(replayPageCoverMs(page.actions));
             if (!page.continuation || page.continuation === nextContinuation) {
               nextContinuation = null;
               scheduler.markExhausted();
@@ -237,6 +282,7 @@ export default function useLiveChat(
           if (disposed || generation !== currentGeneration || replayScheduler !== scheduler) return;
           // Resume from what was actually drained, never past an unreceived page (W6).
           replayResumeOffsetMs = scheduler.resumePositionMs();
+          replayWaitCarryOver = scheduler.carryOver(Date.now());
           scheduleReconnect('provider_poll_failed');
         } finally {
           replayFetchInFlight = false;
@@ -262,12 +308,14 @@ export default function useLiveChat(
           // is left to the stall watchdog.
           if (scheduler.bufferedCount > 0) lastProviderSuccessAt = now;
           if (scheduler.finished()) {
+            publishReplayStatus(scheduler, now, true);
             stopReplay();
             emitHealth('failed', 'provider_stream_ended');
             optionsRef.current.onPlatformStatus?.('ended', 'provider_stream_ended');
             return;
           }
         }
+        publishReplayStatus(scheduler, now);
         replayTimer = setTimeout(tick, REPLAY_TICK_MS);
       };
 

@@ -8,7 +8,7 @@ import {
 } from '../youtube/innertubeFetch';
 import { YoutubeLiveChatHealth } from '../youtube/useLiveChat';
 import { reconnectDelayMs } from '../youtube/liveChatPolicy';
-import { ReplayScheduler } from '../youtube/replayScheduler';
+import { ReplayScheduler, type ReplayStatusSnapshot, type ReplayWaitCarryOver } from '../youtube/replayScheduler';
 import { ChzzkChatItem } from './chzzkChatProtocol';
 import { CHZZK_VIDEO_NO, chzzkVideoChatNextOffset, chzzkVideoChatPage } from './chzzkVideoChat';
 
@@ -43,7 +43,12 @@ export type ChzzkVideoChatHealth = YoutubeLiveChatHealth;
 export interface ChzzkVideoChatOptions {
   onHealthUpdate?: (health: ChzzkVideoChatHealth) => void;
   onPlatformStatus?: (status: 'live' | 'ended' | 'unavailable', code?: CollectorStatusCode) => void;
+  /** Recorded playback state (work list W7, design v4 §4-3): on every transition and every REPLAY_STATUS_PUBLISH_MS. */
+  onReplayStatus?: (status: ReplayStatusSnapshot, code?: CollectorStatusCode) => void;
 }
+
+/** Same cadence as the bridge heartbeat (design v4 §4-3). */
+const REPLAY_STATUS_PUBLISH_MS = 2000;
 
 const INITIAL_HEALTH: ChzzkVideoChatHealth = {
   liveness: 'connecting',
@@ -106,6 +111,23 @@ export default function useChzzkVideoChat(
     let lastMessageAt: number | null = null;
     // A reconnect resumes from the offset playback had reached, not from the start.
     let resumeOffsetMs: number | null = null;
+    let replayWaitCarryOver: ReplayWaitCarryOver | undefined;
+    let activeScheduler: ReplayScheduler<ChzzkChatItem> | null = null;
+    let lastReplayState: ReplayStatusSnapshot['replayState'] | null = null;
+    let lastReplayStatusAt = 0;
+    const publishReplayStatus = (
+      scheduler: ReplayScheduler<ChzzkChatItem>,
+      now: number,
+      force = false,
+      code?: CollectorStatusCode,
+    ) => {
+      const snapshot = scheduler.status(now);
+      const state = code == null ? snapshot.replayState : 'failed';
+      if (!force && state === lastReplayState && now - lastReplayStatusAt < REPLAY_STATUS_PUBLISH_MS) return;
+      lastReplayState = state;
+      lastReplayStatusAt = now;
+      optionsRef.current.onReplayStatus?.({ ...snapshot, replayState: state }, code);
+    };
     let liveness: ChzzkVideoChatHealth['liveness'] = 'connecting';
 
     const emitHealth = (nextLiveness: ChzzkVideoChatHealth['liveness'], statusCode?: CollectorStatusCode) => {
@@ -133,12 +155,16 @@ export default function useChzzkVideoChat(
 
     const fail = (code: CollectorStatusCode, status: 'ended' | 'unavailable') => {
       stop();
+      // The replay's last word before the existing platform_status ends it (design v4 §4-2).
+      if (activeScheduler != null)
+        publishReplayStatus(activeScheduler, Date.now(), true, status === 'ended' ? undefined : code);
       emitHealth('failed', code);
       optionsRef.current.onPlatformStatus?.(status, code);
     };
 
     const scheduleReconnect = (code: CollectorStatusCode) => {
       stop();
+      if (activeScheduler != null) replayWaitCarryOver = activeScheduler.carryOver(Date.now());
       const delay = reconnectDelayMs(reconnectAttempt);
       if (delay == null) {
         fail('reconnect_exhausted', 'unavailable');
@@ -167,7 +193,11 @@ export default function useChzzkVideoChat(
       }
       controller = new AbortController();
       const signal = controller.signal;
-      const scheduler = new ReplayScheduler<ChzzkChatItem>(resumeOffsetMs ?? startOffsetMs);
+      const scheduler = new ReplayScheduler<ChzzkChatItem>(resumeOffsetMs ?? startOffsetMs, undefined, {
+        carryOver: replayWaitCarryOver,
+      });
+      activeScheduler = scheduler;
+      publishReplayStatus(scheduler, Date.now(), true);
       let nextOffsetMs: number | null = scheduler.startOffsetMs;
       let fetchInFlight = false;
       let lastFetchAt = 0;
@@ -192,6 +222,8 @@ export default function useChzzkVideoChat(
           const page = chzzkVideoChatPage(content);
           if (page == null) throw new Error('chzzk_video_page_shape');
           scheduler.push(page.items);
+          // Cover comes from the raw page (next cursor or last raw entry), before filtering (design v4 §3-2).
+          scheduler.coverTo(page.coverMs);
           nextOffsetMs = chzzkVideoChatNextOffset(page, requested);
           if (nextOffsetMs == null) scheduler.markExhausted();
           lastProviderSuccessAt = Date.now();
@@ -239,6 +271,7 @@ export default function useChzzkVideoChat(
             return;
           }
         }
+        publishReplayStatus(scheduler, now);
         replayTimer = setTimeout(tick, REPLAY_TICK_MS);
       };
 
