@@ -191,16 +191,17 @@ export default function useLiveChat(
       // Every reconnect path (fetch failure, stall watchdog, stream end) resumes
       // a recorded playback from the drained position; before W6 the stall path
       // restarted from the URL's start offset.
+      const delay = reconnectDelayMs(reconnectAttempt);
       if (replayScheduler != null) {
         replayResumeOffsetMs = replayScheduler.resumePositionMs();
-        replayWaitCarryOver = replayScheduler.carryOver(Date.now());
+        replayWaitCarryOver = replayScheduler.carryOver();
+        // The replay's last word, produced while the scheduler still exists,
+        // before the existing platform_status ends the run (design v4 §4-2; impl v1 F02).
+        if (delay == null) publishReplayStatus(replayScheduler, Date.now(), true, 'reconnect_exhausted');
       }
       stopActiveLiveChat();
 
-      const delay = reconnectDelayMs(reconnectAttempt);
       if (delay == null) {
-        // The replay's last word before the existing platform_status ends it (design v4 §4-2).
-        if (replayScheduler != null) publishReplayStatus(replayScheduler, Date.now(), true, 'reconnect_exhausted');
         failPermanently('reconnect_exhausted');
         return;
       }
@@ -282,7 +283,7 @@ export default function useLiveChat(
           if (disposed || generation !== currentGeneration || replayScheduler !== scheduler) return;
           // Resume from what was actually drained, never past an unreceived page (W6).
           replayResumeOffsetMs = scheduler.resumePositionMs();
-          replayWaitCarryOver = scheduler.carryOver(Date.now());
+          replayWaitCarryOver = scheduler.carryOver();
           scheduleReconnect('provider_poll_failed');
         } finally {
           replayFetchInFlight = false;

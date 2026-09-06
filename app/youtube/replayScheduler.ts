@@ -100,10 +100,17 @@ export interface ReplayStatusSnapshot {
   replayWaitCount: number;
 }
 
-/** Wait accounting carried into the scheduler a reconnect creates (same run, design v4 §3-1). */
+/**
+ * Wait accounting carried into the scheduler a reconnect creates (same run,
+ * design v4 §3-1). `replayWaitMs` is the metering total of pauses that were
+ * already over; a pause still in progress is carried as its wall-clock start
+ * so the new scheduler resumes it (counted once, backoff time included) and
+ * never re-deducts it from its own clock (impl v1 review F01).
+ */
 export interface ReplayWaitCarryOver {
   replayWaitMs: number;
   replayWaitCount: number;
+  pausedSinceMs: number | null;
 }
 
 /**
@@ -139,10 +146,12 @@ export class ReplayScheduler<T = unknown> {
   private exhaustedPages = false;
   /** Playback position at the last `due()` call — everything at or before it has been released. */
   private lastDuePositionMs: number | null = null;
-  /** Wall-clock start of the current starvation pause; null while playing. */
-  private pausedSinceMs: number | null = null;
-  /** Wall-clock milliseconds spent paused before the current pause (this run, reconnects included). */
-  private pausedTotalMs: number;
+  /** Wall-clock start of the current starvation pause; null while playing. May predate `clockStartMs` when restored. */
+  private pausedSinceMs: number | null;
+  /** Clock correction: pause time that overlapped THIS scheduler's clock and is over. Never carried. */
+  private pausedTotalMs = 0;
+  /** Metering only: pauses completed before this scheduler existed (same run), plus the pre-clock part of a restored pause once it ends. */
+  private carriedWaitMs: number;
   private waitCount: number;
 
   constructor(
@@ -157,8 +166,10 @@ export class ReplayScheduler<T = unknown> {
     this.pauseOnStarvation = options.pauseOnStarvation ?? true;
     this.horizonMs = startOffsetMs;
     this.coverMs = startOffsetMs;
-    this.pausedTotalMs = Math.max(0, Math.floor(options.carryOver?.replayWaitMs ?? 0));
+    this.carriedWaitMs = Math.max(0, Math.floor(options.carryOver?.replayWaitMs ?? 0));
     this.waitCount = Math.max(0, Math.floor(options.carryOver?.replayWaitCount ?? 0));
+    const restored = options.carryOver?.pausedSinceMs;
+    this.pausedSinceMs = this.pauseOnStarvation && restored != null && Number.isFinite(restored) ? restored : null;
   }
 
   get startOffsetMs(): number {
@@ -181,8 +192,11 @@ export class ReplayScheduler<T = unknown> {
   /** Video offset the playback has reached at `nowMs`; frozen while paused (owner decision ③). */
   positionMs(nowMs: number): number {
     if (this.clockStartMs == null) return this.startOffset;
-    const pausedMs = this.pausedTotalMs + (this.pausedSinceMs == null ? 0 : Math.max(0, nowMs - this.pausedSinceMs));
-    return this.startOffset + Math.max(0, nowMs - this.clockStartMs - pausedMs);
+    // Only the part of the current pause that overlaps this clock is deducted; a
+    // restored pause that began before the clock deducts from the clock start.
+    const current =
+      this.pausedSinceMs == null ? 0 : Math.max(0, nowMs - Math.max(this.pausedSinceMs, this.clockStartMs));
+    return this.startOffset + Math.max(0, nowMs - this.clockStartMs - this.pausedTotalMs - current);
   }
 
   /** Feeds one page. Items before the start offset are dropped; the rest are kept in offset order. Items also confirm cover. */
@@ -261,7 +275,10 @@ export class ReplayScheduler<T = unknown> {
     if (this.pausedSinceMs != null) {
       const position = this.positionMs(nowMs);
       if (this.exhaustedPages || this.coverMs - position >= this.resumeAheadMs) {
-        this.pausedTotalMs += Math.max(0, nowMs - this.pausedSinceMs);
+        // Clock correction is the overlap with this clock; the part of a restored
+        // pause that ran before this clock (error + backoff) is metering only.
+        this.pausedTotalMs += Math.max(0, nowMs - Math.max(this.pausedSinceMs, this.clockStartMs));
+        this.carriedWaitMs += Math.max(0, this.clockStartMs - this.pausedSinceMs);
         this.pausedSinceMs = null;
       } else {
         this.lastDuePositionMs = position;
@@ -293,23 +310,41 @@ export class ReplayScheduler<T = unknown> {
 
   /** Wall-clock milliseconds of policy pauses so far (design v4 `replayWaitMs`). */
   replayWaitMs(nowMs: number): number {
-    return this.pausedTotalMs + (this.pausedSinceMs == null ? 0 : Math.max(0, nowMs - this.pausedSinceMs));
+    return (
+      this.carriedWaitMs +
+      this.pausedTotalMs +
+      (this.pausedSinceMs == null ? 0 : Math.max(0, nowMs - this.pausedSinceMs))
+    );
   }
 
   get replayWaitCount(): number {
     return this.waitCount;
   }
 
-  carryOver(nowMs: number): ReplayWaitCarryOver {
-    return { replayWaitMs: this.replayWaitMs(nowMs), replayWaitCount: this.waitCount };
+  /**
+   * What the scheduler a reconnect creates must inherit: the metering total
+   * of pauses already over, the count, and — when a pause is in progress —
+   * its original start, so the pause continues through the backoff as one
+   * segment and is deducted only from the new clock's own span (F01).
+   */
+  carryOver(): ReplayWaitCarryOver {
+    return {
+      replayWaitMs: this.carriedWaitMs + this.pausedTotalMs,
+      replayWaitCount: this.waitCount,
+      pausedSinceMs: this.pausedSinceMs,
+    };
   }
 
   /** The `replay_status` snapshot (design v4 §4-3); `ended`/`failed` are the hook's to decide. */
   status(nowMs: number): ReplayStatusSnapshot {
     const position = this.positionMs(nowMs);
+    // A restored pause shows as catching_up even before the first page of the
+    // reconnect: the wait the viewer sees did not stop at the reconnect.
     const state: ReplayState =
       this.clockStartMs == null
-        ? 'prefilling'
+        ? this.pausedSinceMs != null
+          ? 'catching_up'
+          : 'prefilling'
         : this.finished()
           ? 'ended'
           : this.pausedSinceMs != null

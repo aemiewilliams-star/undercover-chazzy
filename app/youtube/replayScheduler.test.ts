@@ -239,22 +239,85 @@ void test('W7: a covered no-chat span is not starvation, and exhaustion ends ins
   assert.equal(scheduler.status(32_000).replayState, 'ended');
 });
 
-void test('W7: wait accounting carries over a reconnect within the run, and a fresh run starts at zero', () => {
+void test('W7 F01: a pause that was over before the reconnect is metered but never re-deducted from the new clock', () => {
   const first = new ReplayScheduler<string>(0, 10_000, { resumeAheadMs: 20_000 });
   first.start(0);
   first.due(100); // starved immediately (cover 0 <= position 100)
   assert.equal(first.replayWaitCount, 1);
-  const carried = first.carryOver(3_100);
-  assert.deepEqual(carried, { replayWaitMs: 3_000, replayWaitCount: 1 });
+  first.coverTo(30_000);
+  first.push([item(1_000, 'a')]);
+  assert.deepEqual(first.due(5_100), []); // resumed: the 5 s pause is over
+  assert.equal(first.paused, false);
+  const carried = first.carryOver();
+  assert.deepEqual(carried, { replayWaitMs: 5_000, replayWaitCount: 1, pausedSinceMs: null });
   const second = new ReplayScheduler<string>(first.resumePositionMs(), 10_000, {
     resumeAheadMs: 20_000,
     carryOver: carried,
   });
+  assert.equal(second.status(6_000).replayState, 'prefilling');
+  second.push([item(1_000, 'a'), item(2_000, 'b')]);
+  second.coverTo(30_000);
+  second.start(6_000);
+  // One second after the new clock started the position is resume offset (100) + 1 s: the old 5 s wait is not paid again.
+  assert.equal(first.resumePositionMs(), 100);
+  assert.equal(second.positionMs(7_000), 1_100);
+  assert.deepEqual(
+    second.due(7_000).map((i) => i.action),
+    ['a'],
+  );
+  assert.equal(second.replayWaitMs(7_000), 5_000);
   assert.equal(second.replayWaitCount, 1);
-  assert.equal(second.replayWaitMs(0), 3_000);
-  assert.equal(second.status(0).replayState, 'prefilling');
+});
+
+void test('W7 F01: a pause in progress at the reconnect continues through the backoff as one segment and keeps the 20 s rule', () => {
+  const first = new ReplayScheduler<string>(0, 10_000, { resumeAheadMs: 20_000 });
+  first.start(0);
+  first.due(100); // paused since 100
+  assert.equal(first.paused, true);
+  const carried = first.carryOver(); // the error happens at 3_850 while paused
+  assert.deepEqual(carried, { replayWaitMs: 0, replayWaitCount: 1, pausedSinceMs: 100 });
+  const second = new ReplayScheduler<string>(first.resumePositionMs(), 10_000, {
+    resumeAheadMs: 20_000,
+    carryOver: carried,
+  });
+  // During the backoff (no first page yet) the viewer is still catching up, and the wait keeps growing from the original start.
+  assert.equal(second.status(4_850).replayState, 'catching_up');
+  assert.equal(second.replayWaitMs(4_850), 4_750);
+  assert.equal(second.replayWaitCount, 1);
+  // The reconnect's first page brings only 900 ms of cover: still paused, and NOT a new wait segment (count stays 1).
+  second.coverTo(900);
+  second.start(4_850);
+  assert.deepEqual(second.due(4_850), []);
+  assert.equal(second.paused, true);
+  assert.equal(second.status(4_850).replayState, 'catching_up');
+  assert.equal(second.replayWaitCount, 1);
+  assert.equal(second.positionMs(6_850), 0); // frozen at the resume offset
+  // An empty page later changes nothing; 20 s of cover resumes; only the overlap with the new clock is deducted from it.
+  second.coverTo(null);
+  assert.deepEqual(second.due(7_850), []);
+  assert.equal(second.replayWaitCount, 1);
+  second.coverTo(20_000);
+  second.push([item(500, 'a')]);
+  assert.deepEqual(second.due(8_850), []); // resumed this tick; a (500) is not yet due at position 0
+  assert.equal(second.paused, false);
+  assert.equal(second.replayWaitMs(8_850), 8_750); // one segment: 100 → 8_850
+  assert.deepEqual(
+    second.due(9_350).map((i) => i.action),
+    ['a'],
+  ); // position 500 half a second later
+  assert.equal(second.positionMs(9_350), 500);
+  // EOF during a restored pause releases it too.
+  const third = new ReplayScheduler<string>(0, 10_000, {
+    resumeAheadMs: 20_000,
+    carryOver: { replayWaitMs: 0, replayWaitCount: 1, pausedSinceMs: 0 },
+  });
+  third.markExhausted();
+  third.start(1_000);
+  assert.deepEqual(third.due(1_000), []);
+  assert.equal(third.paused, false);
+  assert.equal(third.finished(), true);
   const fresh = new ReplayScheduler<string>(0, 10_000);
-  assert.deepEqual(fresh.carryOver(0), { replayWaitMs: 0, replayWaitCount: 0 });
+  assert.deepEqual(fresh.carryOver(), { replayWaitMs: 0, replayWaitCount: 0, pausedSinceMs: null });
 });
 
 void test('W7: needsMore follows the confirmed cover, so an actions-empty page keeps the fetch loop going', () => {

@@ -153,18 +153,20 @@ export default function useChzzkVideoChat(
       healthTimer = undefined;
     };
 
-    const fail = (code: CollectorStatusCode, status: 'ended' | 'unavailable') => {
+    const fail = (code: CollectorStatusCode, status: 'ended' | 'unavailable', cause: 'eof' | 'error' = 'error') => {
       stop();
-      // The replay's last word before the existing platform_status ends it (design v4 §4-2).
+      // The replay's last word before the existing platform_status ends it
+      // (design v4 §4-2): a normal EOF is `ended`, any provider error — a 404
+      // included — is `failed` with the code (impl v1 F02).
       if (activeScheduler != null)
-        publishReplayStatus(activeScheduler, Date.now(), true, status === 'ended' ? undefined : code);
+        publishReplayStatus(activeScheduler, Date.now(), true, cause === 'eof' ? undefined : code);
       emitHealth('failed', code);
       optionsRef.current.onPlatformStatus?.(status, code);
     };
 
     const scheduleReconnect = (code: CollectorStatusCode) => {
       stop();
-      if (activeScheduler != null) replayWaitCarryOver = activeScheduler.carryOver(Date.now());
+      if (activeScheduler != null) replayWaitCarryOver = activeScheduler.carryOver();
       const delay = reconnectDelayMs(reconnectAttempt);
       if (delay == null) {
         fail('reconnect_exhausted', 'unavailable');
@@ -267,7 +269,7 @@ export default function useChzzkVideoChat(
           if (scheduler.bufferedCount > 0) lastProviderSuccessAt = now;
           if (scheduler.finished()) {
             diag({ at: 'chzzk_video_finished', positionMs: scheduler.positionMs(now) });
-            fail('provider_stream_ended', 'ended');
+            fail('provider_stream_ended', 'ended', 'eof');
             return;
           }
         }

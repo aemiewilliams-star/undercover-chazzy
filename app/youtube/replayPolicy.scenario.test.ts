@@ -44,8 +44,15 @@ function chatOf(profile: Profile): { offsetMs: number; id: number }[] {
   let t = 0;
   let id = 0;
   while (t < profile.videoLengthMs) {
+    // A zero rate is a silent span: the clock advances a second at a time with
+    // no item, so a silent profile really produces chat only after the silence (impl v1 F03).
+    const rate = profile.rate(t);
+    if (rate <= 0) {
+      t += 1000;
+      continue;
+    }
     items.push({ offsetMs: Math.floor(t), id: id++ });
-    t += 1000 / profile.rate(t);
+    t += 1000 / rate;
   }
   return items;
 }
@@ -122,6 +129,8 @@ function simulate(profile: Profile, arm: 'policy' | 'control'): Run {
       const page = inFlight;
       inFlight = null;
       scheduler.push(page.items.map((entry) => ({ offsetMs: entry.offsetMs, action: entry.id })));
+      // Peak stock is reached right after a page lands, before the tick's release (impl v1 F03).
+      bufferedPeak = Math.max(bufferedPeak, scheduler.bufferedCount);
       const cover = page.items.length > 0 ? page.items[page.items.length - 1].offsetMs : null;
       scheduler.coverTo(page.last ? profile.videoLengthMs : cover);
       if (page.last) scheduler.markExhausted();
@@ -226,15 +235,30 @@ for (const profile of scenarios) {
   });
 }
 
+void test('W7 M21 harness: chatOf honours silent spans and page peaks are observed on arrival', () => {
+  const silent: Profile = { name: 'silent', rate: (v) => (v < 60_000 ? 0 : 5), videoLengthMs: 120_000, rttMs: 1000 };
+  const chat = chatOf(silent);
+  assert.equal(chat.length, 300);
+  assert.equal(chat[0].offsetMs, 60_000);
+  assert.equal(chat[chat.length - 1].offsetMs, 119_800);
+  const run = simulate(silent, 'policy');
+  assert.equal(run.released, 300);
+  assert.ok(run.bufferedCountPeak >= 200, `peak ${run.bufferedCountPeak} counts the page on arrival`);
+});
+
 void test('W7 M21: a covered no-chat span never pauses (cover ahead, buffer empty)', () => {
+  // 60 s of silence, then 5/s: the first page's items all sit at ≥ 60 s, so the
+  // page confirms cover to ~100 s and the clock plays through the silence
+  // without a single pause; every item is then released on time.
   const profile: Profile = {
     name: 'silent 60 s then 5/s',
-    rate: (v) => (v < 60_000 ? 0.0001 : 5),
+    rate: (v) => (v < 60_000 ? 0 : 5),
     videoLengthMs: 120_000,
     rttMs: 1000,
   };
   const run = simulate(profile, 'policy');
+  assert.equal(run.released, 300);
   assert.equal(run.duplicates, 0);
-  // The first page covers the silent span (its last item is at ≥ 60 s), so the clock plays through it.
   assert.equal(run.replayWaitCount, 0);
+  assert.ok(run.wallMs >= 120_000, `played through the silence (${run.wallMs} ms)`);
 });
