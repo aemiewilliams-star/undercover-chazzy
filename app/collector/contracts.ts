@@ -25,6 +25,8 @@ export interface CollectorEvent {
   authorOpaqueKey: string;
   normalizedText: string;
   platform: CollectorPlatform;
+  replayMessageId?: string;
+  replayOffsetMs?: number;
 }
 
 export interface CollectorBridgeBase {
@@ -81,6 +83,8 @@ export interface CollectorReplayStatusMessage extends CollectorBridgeBase {
   bufferedCount: number;
   replayWaitMs: number;
   replayWaitCount: number;
+  releasedOffsetMs?: number;
+  releasedEventSequence?: number;
   code?: CollectorStatusCode;
 }
 
@@ -93,6 +97,28 @@ export type CollectorBridgeMessage =
 
 /** Bootstrap feature the app advertises to receive `replay_status` (design v4 §4-2). */
 export const COLLECTOR_REPLAY_STATUS_FEATURE = 'replay-status-v1';
+export const COLLECTOR_REPLAY_IDENTITY_FEATURE = 'replay-identity-v1';
+
+/** Missing metadata stays an ordinary event and blocks the app checkpoint. */
+export function collectorReplayIdentity(
+  config: CollectorRuntimeConfig | null,
+  messageId: unknown,
+  offsetMs: unknown,
+): Pick<CollectorEvent, 'replayMessageId' | 'replayOffsetMs'> {
+  if (
+    config?.playback?.kind !== 'recorded' ||
+    !config.features?.includes(COLLECTOR_REPLAY_IDENTITY_FEATURE) ||
+    typeof messageId !== 'string' ||
+    messageId.length === 0 ||
+    messageId.length > 512 ||
+    typeof offsetMs !== 'number' ||
+    !Number.isSafeInteger(offsetMs) ||
+    offsetMs < 0 ||
+    offsetMs > COLLECTOR_PLAYBACK_MAX_START_OFFSET_MS
+  )
+    return {};
+  return { replayMessageId: messageId, replayOffsetMs: offsetMs };
+}
 
 /**
  * Recorded playback: the broadcast has ended and the channel kept its chat

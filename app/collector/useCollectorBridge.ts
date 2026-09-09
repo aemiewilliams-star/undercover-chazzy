@@ -7,6 +7,7 @@ import {
   CollectorRuntimeConfig,
   collectorBridgeEnvelope,
   replayStatusEnabled,
+  COLLECTOR_REPLAY_IDENTITY_FEATURE,
 } from './contracts';
 import { NormalizedCollectorEvent } from './normalizer';
 import { CollectorEventQueue, COLLECTOR_BATCH_MAX_EVENTS } from './queue';
@@ -133,6 +134,9 @@ export default function useCollectorBridge(config: CollectorRuntimeConfig | null
         bufferedCount: status.bufferedCount,
         replayWaitMs: status.replayWaitMs,
         replayWaitCount: status.replayWaitCount,
+        ...(runtimeConfig.features?.includes(COLLECTOR_REPLAY_IDENTITY_FEATURE) && status.releasedOffsetMs != null
+          ? { releasedOffsetMs: status.releasedOffsetMs, releasedEventSequence: queueRef.current.lastEventSequence }
+          : {}),
         ...(status.replayState === 'failed' && code != null ? { code } : {}),
       });
       return delivered;

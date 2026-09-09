@@ -68,7 +68,7 @@ const INITIAL_HEALTH: YoutubeLiveChatHealth = {
 
 export default function useLiveChat(
   videoId: string | undefined,
-  handleChatUpdate: (action: YTNodes.AddChatItemAction) => void,
+  handleChatUpdate: (action: YTNodes.AddChatItemAction, replayOffsetMs?: number) => void,
   handleMetadataUpdate: (metadata: InstanceType<typeof YT.LiveChat>['metadata']) => void,
   options: YoutubeLiveChatOptions = {},
 ) {
@@ -139,10 +139,10 @@ export default function useLiveChat(
       optionsRef.current.onHealthUpdate?.(next);
     };
 
-    const onChatUpdate = (action: YTNodes.AddChatItemAction) => {
+    const onChatUpdate = (action: YTNodes.AddChatItemAction, replayOffsetMs?: number) => {
       lastMessageAt = Date.now();
       emitHealth(currentLiveness, currentCode);
-      chatUpdateRef.current(action);
+      chatUpdateRef.current(action, replayOffsetMs);
     };
 
     const onMetadataUpdate = (metadata: InstanceType<typeof YT.LiveChat>['metadata']) => {
@@ -301,7 +301,7 @@ export default function useLiveChat(
               if (replaySeen.has(messageId)) continue;
               replaySeen.add(messageId, item.offsetMs, scheduler.resumePositionMs());
             }
-            onChatUpdate(item.action);
+            onChatUpdate(item.action, item.offsetMs);
           }
           // Pages are fetched minutes ahead, so the last real poll can be old
           // while chat is still flowing: buffered playback counts as the

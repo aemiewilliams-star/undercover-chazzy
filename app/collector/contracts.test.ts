@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { collectorBridgeEnvelope, isCollectorRuntimeConfig, replayStatusEnabled } from './contracts';
+import {
+  collectorBridgeEnvelope,
+  isCollectorRuntimeConfig,
+  replayStatusEnabled,
+  collectorReplayIdentity,
+} from './contracts';
 
 void test('collector runtime config accepts only bounded base64url-like identifiers', () => {
   assert.equal(
@@ -61,4 +66,23 @@ void test('W7: features are optional in the bootstrap answer; replay_status is e
     'bridgeVersion',
     'collectorRunId',
   ]);
+});
+
+void test('replay identity is opt-in and preserves equal-offset distinct messages', () => {
+  const base = { bridgeToken: 'token_0123456789abcdef', collectorRunId: 'run_00000001' };
+  const playback = { kind: 'recorded' as const, startOffsetMs: 0 };
+  const config = { ...base, playback, features: ['replay-identity-v1'] };
+  assert.deepEqual(collectorReplayIdentity({ ...base, playback }, 'id1', 1200000), {});
+  assert.deepEqual(collectorReplayIdentity(base, 'id1', 1200000), {});
+  assert.deepEqual(collectorReplayIdentity(config, 'id1', 1200000), {
+    replayMessageId: 'id1',
+    replayOffsetMs: 1200000,
+  });
+  assert.deepEqual(collectorReplayIdentity(config, 'id2', 1200000), {
+    replayMessageId: 'id2',
+    replayOffsetMs: 1200000,
+  });
+  for (const id of [null, '', 'x'.repeat(513)]) assert.deepEqual(collectorReplayIdentity(config, id, 1000), {});
+  for (const offset of [null, -1, NaN, 1.1, 86400001])
+    assert.deepEqual(collectorReplayIdentity(config, 'id', offset), {});
 });

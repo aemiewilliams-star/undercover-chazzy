@@ -331,3 +331,30 @@ void test('W7: needsMore follows the confirmed cover, so an actions-empty page k
   assert.equal(scheduler.needsMore(500), true);
   assert.equal(scheduler.resumePositionMs(), 0); // cover is not a seek target (W6 clamp uses the fetched horizon)
 });
+
+void test('receipt checkpoint barrier excludes unreceived cover and undrained events', () => {
+  const scheduler = new ReplayScheduler<string>(60_000, 120_000);
+  scheduler.start(1_000_000);
+  // Advancing wall time alone provides no delivery proof.
+  assert.equal(scheduler.status(1_020_000).releasedOffsetMs, 60_000);
+  scheduler.push([
+    { offsetMs: 61_000, action: 'first' },
+    { offsetMs: 90_000, action: 'future' },
+  ]);
+  scheduler.coverTo(120_000);
+  assert.equal(scheduler.status(1_020_000).releasedOffsetMs, 60_000);
+  assert.deepEqual(
+    scheduler.due(1_020_000).map((item) => item.action),
+    ['first'],
+  );
+  assert.equal(scheduler.status(1_020_000).releasedOffsetMs, 80_000);
+  assert.equal(scheduler.bufferedCount, 1);
+});
+
+void test('receipt checkpoint barrier advances over drained empty provider coverage only', () => {
+  const scheduler = new ReplayScheduler<string>(0, 120_000);
+  scheduler.coverTo(30_000);
+  scheduler.start(1_000_000);
+  assert.deepEqual(scheduler.due(1_060_000), []);
+  assert.equal(scheduler.status(1_060_000).releasedOffsetMs, 30_000);
+});
