@@ -3,6 +3,7 @@
 import { useCallback, useState } from 'react';
 import { YTNodes } from 'youtubei.js';
 import { normalizeYoutubeTextMessage } from '../../normalizer';
+import { collectorReplayIdentity } from '../../contracts';
 import useCollectorBootstrap from '../../useCollectorBootstrap';
 import useCollectorBridge from '../../useCollectorBridge';
 import useLiveChat, { YoutubeLiveChatHealth } from '../../../youtube/useLiveChat';
@@ -42,7 +43,7 @@ export default function YoutubeCollector({ videoId }: { videoId: string }) {
 
   const playback = runtimeConfig?.playback;
   const handleChatUpdate = useCallback(
-    (action: YTNodes.AddChatItemAction) => {
+    (action: YTNodes.AddChatItemAction, replayOffsetMs?: number) => {
       if (!(action instanceof YTNodes.AddChatItemAction) || action.item.type !== 'LiveChatTextMessage') return;
       const message = action.item as unknown as LiveChatTextMessage;
       const normalized = normalizeYoutubeTextMessage({
@@ -60,9 +61,11 @@ export default function YoutubeCollector({ videoId }: { videoId: string }) {
         recordNormalizationDrop();
         return;
       }
-      enqueue(normalized.event);
+      const messageId = (action.item as unknown as { id?: unknown }).id;
+      const identity = collectorReplayIdentity(runtimeConfig, messageId, replayOffsetMs);
+      enqueue({ ...normalized.event, ...identity });
     },
-    [enqueue, playback, recordNormalizationDrop],
+    [enqueue, playback, runtimeConfig, recordNormalizationDrop],
   );
 
   const handleMetadataUpdate = useCallback(() => {}, []);

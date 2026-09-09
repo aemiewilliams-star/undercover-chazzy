@@ -98,6 +98,8 @@ export interface ReplayStatusSnapshot {
   bufferedCount: number;
   replayWaitMs: number;
   replayWaitCount: number;
+  /** Last drained position bounded by confirmed provider cover. Internal until feature opt-in. */
+  releasedOffsetMs?: number;
 }
 
 /**
@@ -351,6 +353,7 @@ export class ReplayScheduler<T = unknown> {
             ? 'catching_up'
             : 'playing';
     return {
+      releasedOffsetMs: Math.min(this.lastDuePositionMs ?? this.startOffset, this.coverMs),
       replayState: state,
       positionMs: position,
       coveredOffsetMs: this.coverMs,
