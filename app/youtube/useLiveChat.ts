@@ -379,9 +379,11 @@ export default function useLiveChat(
         if (playback?.kind === 'recorded') {
           phase = 'start';
           const continuation = info.livechat?.continuation;
-          if (typeof continuation !== 'string' || continuation === '') {
-            // The channel did not keep this broadcast's chat replay.
-            failPermanently('live_chat_start_failed');
+          if (typeof continuation !== 'string' || continuation.trim() === '') {
+            // One missing chat response cannot distinguish a temporary lookup
+            // failure from an unavailable replay. Retry within the same bounded
+            // budget as other startup failures, preserving the requested offset.
+            scheduleReconnect('get_info_failed');
             return;
           }
           startRecordedPlayback(innertube, continuation, playback, currentGeneration);

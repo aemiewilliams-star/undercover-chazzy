@@ -2,12 +2,18 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import React from 'react';
 import Innertube from 'youtubei.js';
-import useLiveChat from './useLiveChat';
+import useLiveChat, { type YoutubeLiveChatOptions } from './useLiveChat';
 
 type VideoInfo = Awaited<ReturnType<Innertube['getInfo']>>;
 
-async function harness(info: Partial<VideoInfo>, run: (h: Harness) => Promise<void>) {
-  const h = new Harness(info);
+type InfoSequence = Partial<VideoInfo> | Partial<VideoInfo>[];
+
+async function harness(
+  info: InfoSequence,
+  run: (h: Harness) => Promise<void>,
+  playback?: YoutubeLiveChatOptions['playback'],
+) {
+  const h = new Harness(info, playback);
   try {
     h.mount();
     await h.flush();
@@ -21,12 +27,17 @@ class Harness {
   statuses: { status: string; code?: string }[] = [];
   starts = 0;
   lookups = 0;
+  replayRequests: { action: string; offsetMs: string }[] = [];
+  delivered: { id: string; offsetMs?: number }[] = [];
   now = 1_800_000_000_000;
   private timers = new Map<number, { due: number; interval: number; callback: () => void }>();
   private nextId = 1;
   private undo: (() => void)[] = [];
   private cleanup?: () => void;
-  constructor(private readonly info: Partial<VideoInfo>) {}
+  constructor(
+    private readonly info: InfoSequence,
+    private readonly playback?: YoutubeLiveChatOptions['playback'],
+  ) {}
   private setGlobal(name: string, value: unknown) {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
     Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -42,7 +53,7 @@ class Harness {
         getInfo: () => {
           this.lookups++;
           return Promise.resolve({
-            ...this.info,
+            ...(Array.isArray(this.info) ? this.info[Math.min(this.lookups - 1, this.info.length - 1)] : this.info),
             getLiveChat: () => ({
               on: () => {},
               off: () => {},
@@ -52,6 +63,21 @@ class Harness {
               },
             }),
           });
+        },
+        actions: {
+          execute: (action: string, payload: { currentPlayerState: { playerOffsetMs: string } }) => {
+            this.replayRequests.push({ action, offsetMs: payload.currentPlayerState.playerOffsetMs });
+            const start = this.playback?.startOffsetMs ?? 0;
+            return Promise.resolve({
+              continuation_contents: {
+                actions: [1_000, 121_000].map((offset) => ({
+                  type: 'ReplayChatItemAction',
+                  video_offset_time_msec: start + offset,
+                  actions: [{ type: 'AddChatItemAction', item: { id: `message-${offset}` } }],
+                })),
+              },
+            });
+          },
         },
       })) as unknown as typeof Innertube.create;
     this.undo.push(() => {
@@ -100,9 +126,13 @@ class Harness {
       // eslint-disable-next-line react-hooks/rules-of-hooks -- Controlled effect harness, as in CHZZK tests.
       useLiveChat(
         'testVideo01',
-        () => {},
+        (action, offsetMs) => {
+          const id = (action.item as unknown as { id?: unknown }).id;
+          if (typeof id === 'string') this.delivered.push({ id, offsetMs });
+        },
         () => {},
         {
+          playback: this.playback,
           onPlatformStatus: (status, code) => this.statuses.push({ status, code }),
         },
       );
@@ -196,5 +226,64 @@ void test('real connect effect never drains replay chat as a live stream', async
       assert.equal(h.starts, 0);
       assert.deepEqual(h.statuses, [{ status: 'ended', code: 'not_live' }]);
     },
+  );
+});
+
+const recorded = { kind: 'recorded', startOffsetMs: 60_000 } as const;
+const replayInfo: Partial<VideoInfo> = {
+  basic_info: {} as VideoInfo['basic_info'],
+  playability_status: { status: 'LOGIN_REQUIRED' } as VideoInfo['playability_status'],
+  livechat: { is_replay: true, continuation: 'public_replay_chat' } as VideoInfo['livechat'],
+};
+
+void test('recorded startup retries missing chat and preserves the requested offset when it becomes available', async () => {
+  await harness(
+    [{ basic_info: {} as VideoInfo['basic_info'] }, replayInfo],
+    async (h) => {
+      assert.deepEqual(h.statuses, []);
+      assert.equal(h.replayRequests.length, 0);
+      await h.advance(1_000);
+      assert.equal(h.lookups, 2);
+      assert.deepEqual(h.replayRequests, [{ action: 'live_chat/get_live_chat_replay', offsetMs: '60000' }]);
+      assert.deepEqual(h.statuses, [{ status: 'live', code: undefined }]);
+      assert.deepEqual(h.delivered, []);
+      await h.advance(1_000);
+      assert.deepEqual(h.delivered, [{ id: 'message-1000', offsetMs: 61_000 }]);
+      assert.equal(h.starts, 0);
+    },
+    recorded,
+  );
+});
+
+void test('recorded startup bounds retries when no chat is available instead of failing on the first response', async () => {
+  await harness(
+    {
+      basic_info: { is_live: false } as VideoInfo['basic_info'],
+      playability_status: { status: 'OK' } as VideoInfo['playability_status'],
+    },
+    async (h) => {
+      assert.deepEqual(h.statuses, []);
+      await h.advance(31_000);
+      assert.equal(h.lookups, 6);
+      assert.equal(h.replayRequests.length, 0);
+      assert.deepEqual(h.statuses, [{ status: 'unavailable', code: 'reconnect_exhausted' }]);
+      await h.advance(60_000);
+      assert.equal(h.lookups, 6);
+    },
+    recorded,
+  );
+});
+
+void test('recorded startup still immediately uses available public replay when the player requires login', async () => {
+  await harness(
+    replayInfo,
+    async (h) => {
+      assert.equal(h.lookups, 1);
+      assert.deepEqual(h.statuses, [{ status: 'live', code: undefined }]);
+      await h.advance(1_000);
+      assert.deepEqual(h.delivered, [{ id: 'message-1000', offsetMs: 61_000 }]);
+      assert.equal(h.starts, 0);
+    },
+    recorded,
   );
 });
