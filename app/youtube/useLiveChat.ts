@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import Innertube, { YT, YTNodes } from 'youtubei.js';
 import { CollectorLiveness, CollectorPlayback, CollectorStatusCode } from '../collector/contracts';
 import { CollectorProxyConfigurationError, createInnertubeFetch, ProviderFetchObserver } from './innertubeFetch';
-import { providerHasStalled, reconnectDelayMs } from './liveChatPolicy';
+import { providerHasStalled, reconnectDelayMs, youtubeLiveChatStart } from './liveChatPolicy';
 import {
   ReplayScheduler,
   ReplaySeenIds,
@@ -369,7 +369,8 @@ export default function useLiveChat(
           at: 'got_info',
           playback: playback?.kind ?? 'live',
           startOffsetMs: playback?.startOffsetMs,
-          isLive: info.basic_info.is_live === true,
+          isLive: info.basic_info.is_live ?? 'unknown',
+          playerStatus: info.playability_status?.status ?? 'unknown',
           livechat: info.livechat != null,
           replay: info.livechat?.is_replay === true,
           continuation: typeof info.livechat?.continuation === 'string',
@@ -387,10 +388,15 @@ export default function useLiveChat(
           return;
         }
 
-        if (!info.basic_info.is_live) {
+        const chatStart = youtubeLiveChatStart(info);
+        if (chatStart === 'ended') {
           stopActiveLiveChat();
           emitHealth('failed', 'not_live');
           optionsRef.current.onPlatformStatus?.('ended', 'not_live');
+          return;
+        }
+        if (chatStart === 'retry') {
+          scheduleReconnect('get_info_failed');
           return;
         }
 
