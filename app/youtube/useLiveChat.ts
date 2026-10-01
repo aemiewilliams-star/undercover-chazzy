@@ -275,7 +275,22 @@ export default function useLiveChat(
           }
           if (!scheduler.started) {
             scheduler.start(Date.now());
-            diag({ at: 'replay_first_page', items: scheduler.bufferedCount, exhausted: scheduler.exhausted });
+            // A reconnect that re-establishes the replay — a first page with chat
+            // past the resume point — is a recovery, so the retry budget restarts
+            // here. Until 2026-10-01 only a *later* page could reset it (the fetch
+            // observer resets while `collecting()`, which turns true with the
+            // clock), so "reconnect OK → next page fails" cycles exhausted the five
+            // retries while chat was still arriving (session lc_01139bae…, 13:26 KST).
+            // An empty first page is not progress and keeps the budget as it was.
+            const attemptsBefore = reconnectAttempt;
+            if (scheduler.fetchedHorizonMs > scheduler.startOffsetMs) reconnectAttempt = 0;
+            diag({
+              at: 'replay_first_page',
+              items: scheduler.bufferedCount,
+              exhausted: scheduler.exhausted,
+              attempt: attemptsBefore,
+              budgetReset: attemptsBefore > 0 && reconnectAttempt === 0,
+            });
             emitHealth('healthy');
             optionsRef.current.onPlatformStatus?.('live');
           }
@@ -343,9 +358,30 @@ export default function useLiveChat(
           if (collecting()) reconnectAttempt = 0;
           emitHealth(collecting() ? 'healthy' : 'connecting');
         },
-        onRequestFailed: () => {
+        onRequestFailed: (at, failure) => {
           if (disposed || generation !== currentGeneration) return;
+          // Status and duration tell a YouTube refusal (403/429) from a timeout
+          // (status none, long duration); the 2026-10-01 replay death had neither.
+          diag({
+            at: 'provider_request_failed',
+            path: failure.path,
+            status: failure.status ?? 'none',
+            durationMs: failure.durationMs,
+            error: failure.error,
+            attempt: reconnectAttempt,
+          });
           emitHealth('degraded', 'provider_poll_failed');
+        },
+        onBootstrapRequestFailed: (at, failure) => {
+          if (disposed || generation !== currentGeneration) return;
+          diag({
+            at: 'bootstrap_request_failed',
+            path: failure.path,
+            status: failure.status ?? 'none',
+            durationMs: failure.durationMs,
+            error: failure.error,
+            attempt: reconnectAttempt,
+          });
         },
       };
 

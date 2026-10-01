@@ -1,7 +1,36 @@
+/**
+ * What a failed InnerTube request looked like from the collector page, for
+ * diagnostics only (2026-10-01: a replay session died after 73 s of failures
+ * and nothing recorded whether YouTube refused or the request timed out).
+ */
+export interface ProviderRequestFailure {
+  /** InnerTube path, e.g. `/youtubei/v1/live_chat/get_live_chat_replay`; `invalid` when unparsable. */
+  path: string;
+  /** HTTP status when the proxy answered; null when the request threw (network, abort). */
+  status: number | null;
+  durationMs: number;
+  /** Error class name when the request threw. Never the message: it can carry URLs. */
+  error?: string;
+}
+
 export interface ProviderFetchObserver {
   onRequestStarted?: (at: number) => void;
   onRequestSucceeded?: (at: number) => void;
-  onRequestFailed?: (at: number) => void;
+  onRequestFailed?: (at: number, failure: ProviderRequestFailure) => void;
+  /** Bootstrap calls (player, next) that failed. They never decide liveness. */
+  onBootstrapRequestFailed?: (at: number, failure: ProviderRequestFailure) => void;
+}
+
+/** Connect-phase calls whose failures are worth a diagnostic line; metadata polls are not. */
+const BOOTSTRAP_REQUEST_PATHS: ReadonlySet<string> = new Set(['/youtubei/v1/player', '/youtubei/v1/next']);
+
+export function innertubeRequestPath(input: string | Request | RequestInfo | URL): string {
+  try {
+    const source = typeof input === 'string' ? new URL(input) : input instanceof URL ? input : new URL(input.url);
+    return source.pathname;
+  } catch {
+    return 'invalid';
+  }
 }
 
 /**
@@ -79,7 +108,14 @@ export function createInnertubeFetch(
   return async (input: string | Request | RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const startedAt = Date.now();
     const observed = isProviderLivenessRequest(input);
+    const path = innertubeRequestPath(input);
+    const bootstrap = !observed && BOOTSTRAP_REQUEST_PATHS.has(path);
     if (observed) observer.onRequestStarted?.(startedAt);
+    const report = (at: number, failure: Omit<ProviderRequestFailure, 'path' | 'durationMs'>) => {
+      const detail: ProviderRequestFailure = { path, durationMs: Math.max(0, at - startedAt), ...failure };
+      if (observed) observer.onRequestFailed?.(at, detail);
+      else if (bootstrap) observer.onBootstrapRequestFailed?.(at, detail);
+    };
 
     try {
       const rewritten = rewriteInnertubeUrl(input as string | Request | URL, proxyBaseUrl);
@@ -90,13 +126,14 @@ export function createInnertubeFetch(
       }
       headers.set(COLLECTOR_PROXY_HEADER, COLLECTOR_PROXY_HEADER_VALUE);
       const response = await fetch(new Request(request, { headers }), init == null ? undefined : { ...init, headers });
-      if (observed) {
-        if (response.ok) observer.onRequestSucceeded?.(Date.now());
-        else observer.onRequestFailed?.(Date.now());
+      if (response.ok) {
+        if (observed) observer.onRequestSucceeded?.(Date.now());
+      } else {
+        report(Date.now(), { status: response.status });
       }
       return response;
     } catch (error) {
-      if (observed) observer.onRequestFailed?.(Date.now());
+      report(Date.now(), { status: null, error: error instanceof Error ? error.name : typeof error });
       throw error;
     }
   };

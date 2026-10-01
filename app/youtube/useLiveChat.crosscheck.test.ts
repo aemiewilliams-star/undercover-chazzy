@@ -8,12 +8,16 @@ type VideoInfo = Awaited<ReturnType<Innertube['getInfo']>>;
 
 type InfoSequence = Partial<VideoInfo> | Partial<VideoInfo>[];
 
+/** Mocked replay proxy behaviour: which page requests fail, and whether pages keep a continuation. */
+type ReplayPages = { failPage?: (index: number) => boolean; endless?: boolean };
+
 async function harness(
   info: InfoSequence,
   run: (h: Harness) => Promise<void>,
   playback?: YoutubeLiveChatOptions['playback'],
+  pages?: ReplayPages,
 ) {
-  const h = new Harness(info, playback);
+  const h = new Harness(info, playback, pages);
   try {
     h.mount();
     await h.flush();
@@ -37,6 +41,7 @@ class Harness {
   constructor(
     private readonly info: InfoSequence,
     private readonly playback?: YoutubeLiveChatOptions['playback'],
+    private readonly pages: ReplayPages = {},
   ) {}
   private setGlobal(name: string, value: unknown) {
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
@@ -67,6 +72,10 @@ class Harness {
         actions: {
           execute: (action: string, payload: { currentPlayerState: { playerOffsetMs: string } }) => {
             this.replayRequests.push({ action, offsetMs: payload.currentPlayerState.playerOffsetMs });
+            const index = this.replayRequests.length - 1;
+            if (this.pages.failPage?.(index)) {
+              return Promise.reject(new Error('simulated replay page failure'));
+            }
             const start = this.playback?.startOffsetMs ?? 0;
             return Promise.resolve({
               continuation_contents: {
@@ -75,6 +84,8 @@ class Harness {
                   video_offset_time_msec: start + offset,
                   actions: [{ type: 'AddChatItemAction', item: { id: `message-${offset}` } }],
                 })),
+                // Without a token the page is the last one (the pre-existing single-page shape).
+                ...(this.pages.endless ? { continuation: { token: `replay-page-${index + 1}` } } : {}),
               },
             });
           },
@@ -285,5 +296,44 @@ void test('recorded startup still immediately uses available public replay when 
       assert.equal(h.starts, 0);
     },
     recorded,
+  );
+});
+
+void test('recorded reconnects that re-establish the replay do not exhaust the retry budget', async () => {
+  // Production shape of 2026-10-01 13:25-13:26 KST (session lc_01139bae…): every
+  // page after a successful first page fails, and each reconnect gets its first
+  // page again. The five retries ran out in ~40 s while chat was still arriving.
+  // A first page with chat past the resume point now restarts the budget.
+  await harness(
+    replayInfo,
+    async (h) => {
+      await h.advance(120_000);
+      assert.equal(
+        h.statuses.some((s) => s.status === 'unavailable'),
+        false,
+        `exhausted after ${h.lookups} lookups: ${JSON.stringify(h.statuses)}`,
+      );
+      assert.ok(h.lookups >= 8, `expected repeated reconnects, saw ${h.lookups} lookups`);
+      assert.ok(h.replayRequests.length >= 16, `expected repeated pages, saw ${h.replayRequests.length}`);
+      assert.deepEqual(h.delivered.slice(0, 1), [{ id: 'message-1000', offsetMs: 61_000 }]);
+    },
+    recorded,
+    { failPage: (index) => index % 2 === 1, endless: true },
+  );
+});
+
+void test('recorded pages that keep failing without any first page still exhaust the retry budget', async () => {
+  // The budget is only restarted by progress; a proxy that never answers a page
+  // still ends in `reconnect_exhausted` within the same six lookups as before.
+  await harness(
+    replayInfo,
+    async (h) => {
+      await h.advance(60_000);
+      assert.equal(h.lookups, 6);
+      assert.deepEqual(h.statuses, [{ status: 'unavailable', code: 'reconnect_exhausted' }]);
+      assert.deepEqual(h.delivered, []);
+    },
+    recorded,
+    { failPage: () => true },
   );
 });
