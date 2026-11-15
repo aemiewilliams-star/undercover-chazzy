@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { providerHasStalled, reconnectDelayMs, youtubeLiveChatStart } from './liveChatPolicy';
+import {
+  providerHasStalled,
+  reconnectDelayMs,
+  YOUTUBE_RECONNECT_BUDGET_MS,
+  youtubeLiveChatStart,
+  youtubeReconnectDelayMs,
+} from './liveChatPolicy';
 
 void test('public live chat remains available when video playback needs sign-in', () => {
   assert.equal(
@@ -43,8 +49,66 @@ void test('replay and confirmed non-live video never start live collection', () 
   );
 });
 
-void test('reconnect policy retries at 1, 2, 4, 8 and 16 seconds, then stops', () => {
+void test('CHZZK count policy retries at 1, 2, 4, 8 and 16 seconds, then stops', () => {
   assert.deepEqual([0, 1, 2, 3, 4, 5].map(reconnectDelayMs), [1000, 2000, 4000, 8000, 16000, null]);
+});
+
+const OUTAGE_AT = 1_800_000_000_000;
+
+void test('YouTube reconnects back off 1, 2, 4, 8, 16 s and then keep a 30 s cadence', () => {
+  assert.deepEqual(
+    [0, 1, 2, 3, 4, 5, 6, 40].map((attempt) =>
+      youtubeReconnectDelayMs({ attempt, outageStartedAt: OUTAGE_AT, now: OUTAGE_AT, stillLive: false }),
+    ),
+    [1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000],
+  );
+});
+
+void test('YouTube reconnect budget is time since the outage began, not a number of tries', () => {
+  // 2026-11-14 20:02:01 KST: the sixth try came 36 s into the outage and the
+  // count budget ended the source. Inside the time budget it is just another try.
+  assert.equal(
+    youtubeReconnectDelayMs({ attempt: 5, outageStartedAt: OUTAGE_AT, now: OUTAGE_AT + 36_000, stillLive: false }),
+    30000,
+  );
+  assert.equal(
+    youtubeReconnectDelayMs({
+      attempt: 50,
+      outageStartedAt: OUTAGE_AT,
+      now: OUTAGE_AT + YOUTUBE_RECONNECT_BUDGET_MS - 1,
+      stillLive: false,
+    }),
+    30000,
+  );
+  assert.equal(
+    youtubeReconnectDelayMs({
+      attempt: 6,
+      outageStartedAt: OUTAGE_AT,
+      now: OUTAGE_AT + YOUTUBE_RECONNECT_BUDGET_MS,
+      stillLive: false,
+    }),
+    null,
+  );
+});
+
+void test('a YouTube broadcast that is still live is never given up on', () => {
+  assert.equal(
+    youtubeReconnectDelayMs({
+      attempt: 400,
+      outageStartedAt: OUTAGE_AT,
+      now: OUTAGE_AT + 4 * 3_600_000,
+      stillLive: true,
+    }),
+    30000,
+  );
+});
+
+void test('YouTube reconnect policy rejects an invalid attempt', () => {
+  for (const attempt of [-1, 1.5, Number.NaN])
+    assert.equal(
+      youtubeReconnectDelayMs({ attempt, outageStartedAt: OUTAGE_AT, now: OUTAGE_AT, stillLive: true }),
+      null,
+    );
 });
 
 void test('provider liveness uses successful polls, not chat message activity', () => {

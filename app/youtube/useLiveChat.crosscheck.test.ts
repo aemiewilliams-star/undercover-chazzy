@@ -195,7 +195,9 @@ void test('real connect effect starts public chat when player response omits liv
   );
 });
 
-void test('real connect effect retries unknown availability and exhausts without reporting ended', async () => {
+void test('real connect effect retries unknown availability and exhausts by time without reporting ended', async () => {
+  // No lookup ever says live: the outage ends after the time budget (180 s),
+  // not after five tries. Lookups at 0, 1, 3, 7, 15, 31, then every 30 s.
   await harness(
     {
       basic_info: {} as VideoInfo['basic_info'],
@@ -205,7 +207,68 @@ void test('real connect effect retries unknown availability and exhausts without
       assert.deepEqual(h.statuses, []);
       await h.advance(31_000);
       assert.equal(h.lookups, 6);
+      assert.deepEqual(h.statuses, []);
+      await h.advance(150_000);
+      assert.equal(h.lookups, 11);
       assert.equal(h.starts, 0);
+      assert.deepEqual(h.statuses, [{ status: 'unavailable', code: 'reconnect_exhausted' }]);
+      await h.advance(120_000);
+      assert.equal(h.lookups, 11);
+    },
+  );
+});
+
+/** 2026-11-14 20:01:25–20:02:01 KST collector-diag (MBC 24-hour live, second source of two). */
+const liveWithoutChatRenderer: Partial<VideoInfo> = {
+  basic_info: { is_live: true } as VideoInfo['basic_info'],
+  playability_status: { status: 'UNPLAYABLE' } as VideoInfo['playability_status'],
+};
+const liveWithChat: Partial<VideoInfo> = {
+  ...liveWithoutChatRenderer,
+  livechat: { is_replay: false, continuation: 'public_live_chat' } as VideoInfo['livechat'],
+};
+
+void test('a live broadcast whose lookups briefly omit the chat renderer keeps retrying and then collects', async () => {
+  // Six lookups in a row said is_live (player UNPLAYABLE) but came back without
+  // the live chat renderer; the 1+2+4+8+16 s count budget ended the source at the
+  // sixth, 36 s in (`reconnect_exhausted`), while its chat was flowing. The same
+  // video through the same proxy returned the renderer again the next day.
+  await harness([...Array<Partial<VideoInfo>>(8).fill(liveWithoutChatRenderer), liveWithChat], async (h) => {
+    await h.advance(31_000);
+    assert.equal(h.lookups, 6);
+    assert.deepEqual(h.statuses, [], 'the sixth missing renderer must not end a live broadcast');
+    await h.advance(90_000);
+    assert.equal(h.lookups, 9);
+    assert.equal(h.starts, 1);
+    assert.deepEqual(h.statuses, [{ status: 'live', code: undefined }]);
+  });
+});
+
+void test('a broadcast that stays live is retried every 30 s for the whole session instead of failing', async () => {
+  await harness(liveWithoutChatRenderer, async (h) => {
+    await h.advance(30 * 60_000);
+    assert.deepEqual(h.statuses, []);
+    // 0, 1, 3, 7, 15, 31 s, then one lookup every 30 s up to 30 min: 6 + 58.
+    assert.equal(h.lookups, 64);
+    assert.equal(h.starts, 0);
+  });
+});
+
+void test('a lookup that says the broadcast is no longer live ends the retries within the time budget', async () => {
+  // The outage clock runs from the first failure, so the budget is not restarted
+  // by the lookup that flips the broadcast to not live.
+  const noLongerLive: Partial<VideoInfo> = {
+    basic_info: { is_live: false } as VideoInfo['basic_info'],
+    playability_status: { status: 'UNPLAYABLE' } as VideoInfo['playability_status'],
+  };
+  await harness(
+    [liveWithoutChatRenderer, liveWithoutChatRenderer, liveWithoutChatRenderer, noLongerLive],
+    async (h) => {
+      await h.advance(151_000);
+      assert.equal(h.lookups, 10);
+      assert.deepEqual(h.statuses, []);
+      await h.advance(30_000);
+      assert.equal(h.lookups, 11);
       assert.deepEqual(h.statuses, [{ status: 'unavailable', code: 'reconnect_exhausted' }]);
     },
   );
@@ -267,6 +330,7 @@ void test('recorded startup retries missing chat and preserves the requested off
 });
 
 void test('recorded startup bounds retries when no chat is available instead of failing on the first response', async () => {
+  // A replay is never live: it keeps the 180 s time budget.
   await harness(
     {
       basic_info: { is_live: false } as VideoInfo['basic_info'],
@@ -276,10 +340,13 @@ void test('recorded startup bounds retries when no chat is available instead of 
       assert.deepEqual(h.statuses, []);
       await h.advance(31_000);
       assert.equal(h.lookups, 6);
+      assert.deepEqual(h.statuses, []);
+      await h.advance(150_000);
+      assert.equal(h.lookups, 11);
       assert.equal(h.replayRequests.length, 0);
       assert.deepEqual(h.statuses, [{ status: 'unavailable', code: 'reconnect_exhausted' }]);
       await h.advance(60_000);
-      assert.equal(h.lookups, 6);
+      assert.equal(h.lookups, 11);
     },
     recorded,
   );
@@ -324,12 +391,15 @@ void test('recorded reconnects that re-establish the replay do not exhaust the r
 
 void test('recorded pages that keep failing without any first page still exhaust the retry budget', async () => {
   // The budget is only restarted by progress; a proxy that never answers a page
-  // still ends in `reconnect_exhausted` within the same six lookups as before.
+  // still ends in `reconnect_exhausted` once the outage passes the 180 s budget.
   await harness(
     replayInfo,
     async (h) => {
       await h.advance(60_000);
       assert.equal(h.lookups, 6);
+      assert.deepEqual(h.statuses, []);
+      await h.advance(121_000);
+      assert.equal(h.lookups, 11);
       assert.deepEqual(h.statuses, [{ status: 'unavailable', code: 'reconnect_exhausted' }]);
       assert.deepEqual(h.delivered, []);
     },
