@@ -233,24 +233,36 @@ void test('a live broadcast whose lookups briefly omit the chat renderer keeps r
   // the live chat renderer; the 1+2+4+8+16 s count budget ended the source at the
   // sixth, 36 s in (`reconnect_exhausted`), while its chat was flowing. The same
   // video through the same proxy returned the renderer again the next day.
-  await harness([...Array<Partial<VideoInfo>>(8).fill(liveWithoutChatRenderer), liveWithChat], async (h) => {
+  // Here the renderer comes back on the twelfth lookup (211 s): past the 3-minute
+  // budget, inside the 10-minute budget a live broadcast gets.
+  await harness([...Array<Partial<VideoInfo>>(11).fill(liveWithoutChatRenderer), liveWithChat], async (h) => {
     await h.advance(31_000);
     assert.equal(h.lookups, 6);
     assert.deepEqual(h.statuses, [], 'the sixth missing renderer must not end a live broadcast');
-    await h.advance(90_000);
-    assert.equal(h.lookups, 9);
+    await h.advance(150_000);
+    assert.equal(h.lookups, 11);
+    assert.deepEqual(h.statuses, [], 'a live broadcast is not held to the 3-minute budget');
+    await h.advance(30_000);
+    assert.equal(h.lookups, 12);
     assert.equal(h.starts, 1);
     assert.deepEqual(h.statuses, [{ status: 'live', code: undefined }]);
   });
 });
 
-void test('a broadcast that stays live is retried every 30 s for the whole session instead of failing', async () => {
+void test('a broadcast that stays live but never gets its chat fails at the 10-minute budget', async () => {
+  // Owner decision 2026-11-15 ("10분 뒤 실패로"): live evidence extends the budget
+  // to 10 minutes from the first failure, not for the whole session.
+  // Lookups at 0, 1, 3, 7, 15, 31 s, then every 30 s; the try at 601 s is over budget.
   await harness(liveWithoutChatRenderer, async (h) => {
-    await h.advance(30 * 60_000);
+    await h.advance(600_000);
+    assert.equal(h.lookups, 24);
     assert.deepEqual(h.statuses, []);
-    // 0, 1, 3, 7, 15, 31 s, then one lookup every 30 s up to 30 min: 6 + 58.
-    assert.equal(h.lookups, 64);
+    await h.advance(1_000);
+    assert.equal(h.lookups, 25);
     assert.equal(h.starts, 0);
+    assert.deepEqual(h.statuses, [{ status: 'unavailable', code: 'reconnect_exhausted' }]);
+    await h.advance(10 * 60_000);
+    assert.equal(h.lookups, 25);
   });
 });
 

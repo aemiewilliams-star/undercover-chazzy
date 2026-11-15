@@ -4,6 +4,7 @@ import {
   providerHasStalled,
   reconnectDelayMs,
   YOUTUBE_RECONNECT_BUDGET_MS,
+  YOUTUBE_RECONNECT_LIVE_BUDGET_MS,
   youtubeLiveChatStart,
   youtubeReconnectDelayMs,
 } from './liveChatPolicy';
@@ -91,15 +92,35 @@ void test('YouTube reconnect budget is time since the outage began, not a number
   );
 });
 
-void test('a YouTube broadcast that is still live is never given up on', () => {
+void test('a YouTube broadcast that is still live gets 10 minutes, then fails (owner decision 2026-11-15)', () => {
+  // Past the 3-minute budget a live broadcast is still retried …
   assert.equal(
     youtubeReconnectDelayMs({
-      attempt: 400,
+      attempt: 10,
       outageStartedAt: OUTAGE_AT,
-      now: OUTAGE_AT + 4 * 3_600_000,
+      now: OUTAGE_AT + YOUTUBE_RECONNECT_BUDGET_MS,
       stillLive: true,
     }),
     30000,
+  );
+  assert.equal(
+    youtubeReconnectDelayMs({
+      attempt: 24,
+      outageStartedAt: OUTAGE_AT,
+      now: OUTAGE_AT + YOUTUBE_RECONNECT_LIVE_BUDGET_MS - 1,
+      stillLive: true,
+    }),
+    30000,
+  );
+  // … until 10 minutes from the first failure.
+  assert.equal(
+    youtubeReconnectDelayMs({
+      attempt: 25,
+      outageStartedAt: OUTAGE_AT,
+      now: OUTAGE_AT + YOUTUBE_RECONNECT_LIVE_BUDGET_MS,
+      stillLive: true,
+    }),
+    null,
   );
 });
 

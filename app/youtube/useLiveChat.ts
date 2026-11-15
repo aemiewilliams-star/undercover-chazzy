@@ -207,8 +207,8 @@ export default function useLiveChat(
       if (disposed || reconnectScheduled) return;
       const now = Date.now();
       if (outageStartedAt == null) outageStartedAt = now;
-      // Time-based budget with a capped backoff (1, 2, 4, 8, 16, then every 30 s).
-      // A broadcast whose latest lookup said live is never given up on here.
+      // Time-based budget with a capped backoff (1, 2, 4, 8, 16, then every 30 s):
+      // 3 minutes from the first failure, 10 minutes while the latest lookup said live.
       const delay = youtubeReconnectDelayMs({ attempt: reconnectAttempt, outageStartedAt, now, stillLive });
       diag({
         at: 'schedule_reconnect',

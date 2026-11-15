@@ -8,12 +8,18 @@ export const PROVIDER_STALL_MS = 60000;
  */
 export const YOUTUBE_RECONNECT_BACKOFF_MS = [1000, 2000, 4000, 8000, 16000, 30000] as const;
 /**
- * How long one outage may last before the collector gives up, unless the
- * broadcast is still live. Time, not tries: on 2026-11-14 a live broadcast whose
- * lookups all said `is_live` but briefly came back without the chat renderer
- * used up the five tries (1+2+4+8+16 s) in 36 s and never collected again.
+ * How long one outage may last before the collector gives up, measured from its
+ * first failure. Time, not tries: on 2026-11-14 a live broadcast whose lookups
+ * all said `is_live` but briefly came back without the chat renderer used up the
+ * five tries (1+2+4+8+16 s) in 36 s and never collected again.
  */
 export const YOUTUBE_RECONNECT_BUDGET_MS = 180_000;
+/**
+ * The same budget while the latest lookup says the broadcast is live. Owner
+ * decision 2026-11-15 ("10분 뒤 실패로"): even a live broadcast whose chat cannot
+ * be attached for 10 minutes from the first failure is reported failed.
+ */
+export const YOUTUBE_RECONNECT_LIVE_BUDGET_MS = 600_000;
 
 interface YoutubeChatAvailability {
   basic_info: { is_live?: boolean };
@@ -51,8 +57,8 @@ export interface YoutubeReconnectState {
   now: number;
   /**
    * The latest lookup that answered said the broadcast is live (`is_live`, or a
-   * live chat continuation). A live broadcast is retried for as long as it stays
-   * live; the session's own end (operator stop, time limit) still stops it.
+   * live chat continuation): the outage gets the 10-minute live budget instead
+   * of 3 minutes. The session's own end (operator stop, time limit) still stops it.
    */
   stillLive: boolean;
 }
@@ -65,7 +71,8 @@ export function youtubeReconnectDelayMs({
   stillLive,
 }: YoutubeReconnectState): number | null {
   if (!Number.isInteger(attempt) || attempt < 0) return null;
-  if (!stillLive && now - outageStartedAt >= YOUTUBE_RECONNECT_BUDGET_MS) return null;
+  const budgetMs = stillLive ? YOUTUBE_RECONNECT_LIVE_BUDGET_MS : YOUTUBE_RECONNECT_BUDGET_MS;
+  if (now - outageStartedAt >= budgetMs) return null;
   return YOUTUBE_RECONNECT_BACKOFF_MS[Math.min(attempt, YOUTUBE_RECONNECT_BACKOFF_MS.length - 1)];
 }
 
