@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import Innertube, { YT, YTNodes } from 'youtubei.js';
 import { CollectorLiveness, CollectorPlayback, CollectorStatusCode } from '../collector/contracts';
 import { CollectorProxyConfigurationError, createInnertubeFetch, ProviderFetchObserver } from './innertubeFetch';
-import { providerHasStalled, reconnectDelayMs, youtubeLiveChatStart } from './liveChatPolicy';
+import { providerHasStalled, youtubeLiveChatStart, youtubeReconnectDelayMs } from './liveChatPolicy';
 import {
   ReplayScheduler,
   ReplaySeenIds,
@@ -91,6 +91,13 @@ export default function useLiveChat(
     let generation = 0;
     let reconnectAttempt = 0;
     let reconnectScheduled = false;
+    /** First failure since the collector was last healthy; the reconnect budget is time from here. */
+    let outageStartedAt: number | null = null;
+    /**
+     * The latest lookup that answered said the broadcast is live. Live playback
+     * only; a recorded playback is never live and keeps the time budget.
+     */
+    let stillLive = false;
     let lastProviderPollStartedAt: number | null = null;
     let lastProviderSuccessAt: number | null = null;
     let lastMessageAt: number | null = null;
@@ -122,6 +129,11 @@ export default function useLiveChat(
     // Survives reconnects; evicts only ids before the resume boundary (W6 F1).
     const replaySeen = new ReplaySeenIds(REPLAY_SEEN_LIMIT);
     const collecting = () => activeLiveChat != null || (replayScheduler?.started ?? false);
+    /** Recovery restarts the reconnect budget: backoff from the first step, outage clock cleared. */
+    const recovered = () => {
+      reconnectAttempt = 0;
+      outageStartedAt = null;
+    };
 
     const emitHealth = (liveness: CollectorLiveness, code?: CollectorStatusCode) => {
       if (disposed) return;
@@ -178,7 +190,13 @@ export default function useLiveChat(
     };
 
     const failPermanently = (code: CollectorStatusCode) => {
-      diag({ at: 'fail_permanently', code, attempt: reconnectAttempt });
+      diag({
+        at: 'fail_permanently',
+        code,
+        attempt: reconnectAttempt,
+        outageMs: outageStartedAt == null ? undefined : Date.now() - outageStartedAt,
+        stillLive,
+      });
       reconnectScheduled = false;
       stopActiveLiveChat();
       emitHealth('failed', code);
@@ -187,11 +205,22 @@ export default function useLiveChat(
 
     const scheduleReconnect = (code: CollectorStatusCode) => {
       if (disposed || reconnectScheduled) return;
-      diag({ at: 'schedule_reconnect', code, attempt: reconnectAttempt });
+      const now = Date.now();
+      if (outageStartedAt == null) outageStartedAt = now;
+      // Time-based budget with a capped backoff (1, 2, 4, 8, 16, then every 30 s):
+      // 3 minutes from the first failure, 10 minutes while the latest lookup said live.
+      const delay = youtubeReconnectDelayMs({ attempt: reconnectAttempt, outageStartedAt, now, stillLive });
+      diag({
+        at: 'schedule_reconnect',
+        code,
+        attempt: reconnectAttempt,
+        delayMs: delay ?? undefined,
+        outageMs: now - outageStartedAt,
+        stillLive,
+      });
       // Every reconnect path (fetch failure, stall watchdog, stream end) resumes
       // a recorded playback from the drained position; before W6 the stall path
       // restarted from the URL's start offset.
-      const delay = reconnectDelayMs(reconnectAttempt);
       if (replayScheduler != null) {
         replayResumeOffsetMs = replayScheduler.resumePositionMs();
         replayWaitCarryOver = replayScheduler.carryOver();
@@ -283,7 +312,7 @@ export default function useLiveChat(
             // retries while chat was still arriving (session lc_01139bae…, 13:26 KST).
             // An empty first page is not progress and keeps the budget as it was.
             const attemptsBefore = reconnectAttempt;
-            if (scheduler.fetchedHorizonMs > scheduler.startOffsetMs) reconnectAttempt = 0;
+            if (scheduler.fetchedHorizonMs > scheduler.startOffsetMs) recovered();
             diag({
               at: 'replay_first_page',
               items: scheduler.bufferedCount,
@@ -355,7 +384,7 @@ export default function useLiveChat(
         onRequestSucceeded: (at) => {
           if (disposed || generation !== currentGeneration) return;
           lastProviderSuccessAt = at;
-          if (collecting()) reconnectAttempt = 0;
+          if (collecting()) recovered();
           emitHealth(collecting() ? 'healthy' : 'connecting');
         },
         onRequestFailed: (at, failure) => {
@@ -426,6 +455,10 @@ export default function useLiveChat(
           return;
         }
 
+        // An unanswered field keeps what the last answer said: the player omits
+        // it when it wants a sign-in (LOGIN_REQUIRED).
+        if (info.basic_info.is_live === true) stillLive = true;
+        else if (info.basic_info.is_live === false) stillLive = false;
         const chatStart = youtubeLiveChatStart(info);
         if (chatStart === 'ended') {
           stopActiveLiveChat();
@@ -439,6 +472,8 @@ export default function useLiveChat(
         }
 
         phase = 'start';
+        // A live chat continuation is live evidence even when the player hid `is_live`.
+        stillLive = true;
         const createdLiveChat = info.getLiveChat();
         createdLiveChat.on('metadata-update', onMetadataUpdate);
         createdLiveChat.on('chat-update', onChatUpdate);
